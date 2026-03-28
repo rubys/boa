@@ -53,6 +53,12 @@ impl JitFn {
     /// - 1: `handle_return` returned `Break(Return(value))` — `exit_early`
     ///   was set, value is in the `CompletionRecord`.
     /// - 2: An exception occurred — stored in `pending_exception`.
+    /// Call the raw JIT function and return the tag directly.
+    /// Used by jit_call helper for direct JIT-to-JIT calls.
+    pub(super) unsafe fn call_raw(self, context: *mut Context, reg_base: *mut u64) -> u64 {
+        (self.0)(context, reg_base)
+    }
+
     pub(crate) fn call(self, context: &mut Context) -> CompletionRecord {
         // Compute the register base pointer: &mut stack[rp] as *mut u64.
         // JsValue is 8 bytes (u64-sized) on 64-bit, so we can treat the

@@ -461,31 +461,59 @@ pub(super) extern "C" fn jit_call(ctx: &mut Context, argument_count: u32) -> u64
         }
     }
 
-    // Run until the callee frame completes.
-    // We track the frame depth and run the interpreter loop until it drops
-    // back to the current level.
-    let target_depth = ctx.vm.frames.len() - 1; // depth before the callee was pushed
-    loop {
-        // Check if the callee is JIT-compiled.
-        #[cfg(feature = "jit")]
-        if ctx.vm.frame().pc == 0 {
-            if let Some(record) = ctx.try_run_jit() {
-                match record {
-                    crate::vm::CompletionRecord::Normal(_) => {
-                        if ctx.vm.frames.len() <= target_depth + 1 {
-                            return 0;
+    // Try to run the callee via JIT. This handles:
+    // 1. Already compiled → call JIT function directly (native call!)
+    // 2. Pending + threshold reached → compile and call
+    // 3. Pending + below threshold → fall through to interpreter
+    // 4. Unsupported → fall through to interpreter
+    #[cfg(feature = "jit")]
+    {
+        use crate::vm::code_block::JitState;
+
+        let code = ctx.vm.frame().code_block.clone();
+        let state = code.jit.get();
+
+        let jit_fn = match state {
+            JitState::Compiled(jit_fn) => Some(jit_fn),
+            JitState::Pending { call_count } => {
+                let new_count = call_count + 1;
+                if new_count >= crate::Context::JIT_THRESHOLD {
+                    let compiler = ctx
+                        .vm
+                        .jit_compiler
+                        .get_or_insert_with(|| {
+                            super::JitCompiler::new().expect("JIT compiler should initialize")
+                        });
+                    match compiler.compile(&code) {
+                        Some(f) => {
+                            code.jit.set(JitState::Compiled(f));
+                            Some(f)
                         }
-                        continue;
+                        None => {
+                            code.jit.set(JitState::Unsupported);
+                            None
+                        }
                     }
-                    crate::vm::CompletionRecord::Return(_) => return 0,
-                    crate::vm::CompletionRecord::Throw(err) => {
-                        ctx.vm.pending_exception = Some(err);
-                        return 1;
-                    }
+                } else {
+                    code.jit.set(JitState::Pending { call_count: new_count });
+                    None
                 }
             }
-        }
+            JitState::Unsupported => None,
+        };
 
+        if let Some(jit_fn) = jit_fn {
+            // Direct native call to the callee's JIT function!
+            let rp = ctx.vm.frame().rp as usize;
+            let reg_base = ctx.vm.stack.stack[rp..].as_mut_ptr().cast::<u64>();
+            let tag = unsafe { jit_fn.call_raw(ctx as *mut Context, reg_base) };
+            return tag;
+        }
+    }
+
+    // Fallback: run the callee frame via a mini interpreter loop.
+    let target_depth = ctx.vm.frames.len() - 1;
+    loop {
         let Some(byte) = ctx
             .vm
             .frame()
@@ -494,7 +522,7 @@ pub(super) extern "C" fn jit_call(ctx: &mut Context, argument_count: u32) -> u64
             .bytes
             .get(ctx.vm.frame().pc as usize)
         else {
-            return 1; // unexpected end of bytecode
+            return 1;
         };
 
         let opcode = crate::vm::opcode::Opcode::decode(*byte);
@@ -503,9 +531,27 @@ pub(super) extern "C" fn jit_call(ctx: &mut Context, argument_count: u32) -> u64
         let pc = ctx.vm.frame().pc as usize;
         match crate::vm::opcode::OPCODE_HANDLERS[opcode as usize](ctx, pc) {
             ControlFlow::Continue(()) => {
-                // Check if we've returned to the caller's frame.
                 if ctx.vm.frames.len() <= target_depth + 1 {
                     return 0;
+                }
+                // Check for JIT at frame boundaries in nested calls.
+                #[cfg(feature = "jit")]
+                if ctx.vm.frame().pc == 0 {
+                    if let Some(record) = ctx.try_run_jit() {
+                        match record {
+                            crate::vm::CompletionRecord::Normal(_) => {
+                                if ctx.vm.frames.len() <= target_depth + 1 {
+                                    return 0;
+                                }
+                                continue;
+                            }
+                            crate::vm::CompletionRecord::Return(_) => return 0,
+                            crate::vm::CompletionRecord::Throw(err) => {
+                                ctx.vm.pending_exception = Some(err);
+                                return 1;
+                            }
+                        }
+                    }
                 }
             }
             ControlFlow::Break(record) => {
