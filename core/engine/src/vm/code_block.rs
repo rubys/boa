@@ -10,6 +10,9 @@ use crate::{
     },
     object::JsObject,
 };
+
+#[cfg(feature = "jit")]
+use super::jit;
 use bitflags::bitflags;
 use boa_ast::scope::{BindingLocator, Scope};
 use boa_gc::{Finalize, Gc, Trace, empty_trace};
@@ -118,6 +121,25 @@ pub(crate) struct GlobalFunctionBinding {
     pub(crate) function_index: u32,
 }
 
+/// JIT compilation state for a [`CodeBlock`].
+#[cfg(feature = "jit")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum JitState {
+    /// Not yet attempted. Tracks how many times the function has been called.
+    Pending { call_count: u32 },
+    /// JIT compilation was attempted but the function uses unsupported opcodes.
+    Unsupported,
+    /// Successfully compiled. Stores the native function pointer.
+    Compiled(jit::JitFn),
+}
+
+#[cfg(feature = "jit")]
+impl Default for JitState {
+    fn default() -> Self {
+        Self::Pending { call_count: 0 }
+    }
+}
+
 /// The internal representation of a JavaScript function.
 ///
 /// A `CodeBlock` is generated for each function compiled by the
@@ -172,6 +194,12 @@ pub struct CodeBlock {
     #[cfg(feature = "trace")]
     #[unsafe_ignore_trace]
     pub(crate) traced: Cell<bool>,
+
+    /// JIT compilation state. Tracks execution count and stores the compiled
+    /// native function pointer once the function becomes hot.
+    #[cfg(feature = "jit")]
+    #[unsafe_ignore_trace]
+    pub(crate) jit: Cell<JitState>,
 }
 
 /// ---- `CodeBlock` public API ----
@@ -204,6 +232,8 @@ impl CodeBlock {
             debug_id: CodeBlock::get_next_codeblock_id(),
             #[cfg(feature = "trace")]
             traced: Cell::new(false),
+            #[cfg(feature = "jit")]
+            jit: Cell::new(JitState::default()),
         }
     }
 

@@ -45,6 +45,9 @@ pub use {
 
 pub(crate) use code_block::GlobalFunctionBinding;
 
+#[cfg(feature = "jit")]
+pub(crate) use code_block::JitState;
+
 mod call_frame;
 mod code_block;
 mod completion_record;
@@ -57,6 +60,9 @@ pub(crate) mod source_info;
 
 #[cfg(feature = "flowgraph")]
 pub mod flowgraph;
+
+#[cfg(feature = "jit")]
+pub(crate) mod jit;
 
 #[cfg(test)]
 mod tests;
@@ -102,6 +108,10 @@ pub struct Vm {
     pub(crate) trace: bool,
     #[cfg(feature = "trace")]
     pub(crate) current_frame: Option<*const CallFrame>,
+
+    /// JIT compiler instance, created lazily on first use.
+    #[cfg(feature = "jit")]
+    pub(crate) jit_compiler: Option<jit::JitCompiler>,
 }
 
 /// The stack holds the [`JsValue`]s for the calling convention and registers.
@@ -353,6 +363,8 @@ impl Vm {
             trace: false,
             #[cfg(feature = "trace")]
             current_frame: None,
+            #[cfg(feature = "jit")]
+            jit_compiler: None,
         }
     }
 
@@ -899,7 +911,79 @@ impl Context {
         CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
     }
 
+    /// Number of calls before a function becomes eligible for JIT compilation.
+    #[cfg(feature = "jit")]
+    const JIT_THRESHOLD: u32 = 10;
+
+    /// Try to execute the current frame via JIT-compiled code.
+    ///
+    /// Returns `Some(record)` if the function was JIT'd and executed,
+    /// or `None` to fall back to the interpreter.
+    #[cfg(feature = "jit")]
+    fn try_run_jit(&mut self) -> Option<CompletionRecord> {
+        use code_block::JitState;
+
+        let code = self.vm.frame().code_block.clone();
+        let state = code.jit.get();
+
+        match state {
+            JitState::Compiled(jit_fn) => {
+                // Call the JIT'd function directly.
+                match jit_fn(self) {
+                    ControlFlow::Continue(()) => {
+                        // The JIT function completed and pushed its result.
+                        // Continue with whatever the caller expects.
+                        None
+                    }
+                    ControlFlow::Break(record) => Some(record),
+                }
+            }
+            JitState::Unsupported => {
+                // Already tried and failed — fall through to interpreter.
+                None
+            }
+            JitState::Pending { call_count } => {
+                let new_count = call_count + 1;
+                if new_count < Self::JIT_THRESHOLD {
+                    code.jit.set(JitState::Pending {
+                        call_count: new_count,
+                    });
+                    return None;
+                }
+
+                // Reached threshold — try to compile.
+                let compiler = self
+                    .vm
+                    .jit_compiler
+                    .get_or_insert_with(|| {
+                        jit::JitCompiler::new().expect("JIT compiler should initialize")
+                    });
+
+                match compiler.compile(&code) {
+                    Some(jit_fn) => {
+                        code.jit.set(JitState::Compiled(jit_fn));
+                        // Execute the freshly compiled function.
+                        match jit_fn(self) {
+                            ControlFlow::Continue(()) => None,
+                            ControlFlow::Break(record) => Some(record),
+                        }
+                    }
+                    None => {
+                        code.jit.set(JitState::Unsupported);
+                        None
+                    }
+                }
+            }
+        }
+    }
+
     pub(crate) fn run(&mut self) -> CompletionRecord {
+        // JIT: try to run the current frame's code block as native code.
+        #[cfg(feature = "jit")]
+        if let Some(record) = self.try_run_jit() {
+            return record;
+        }
+
         while let Some(byte) = self
             .vm
             .frame()

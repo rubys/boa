@@ -91,6 +91,15 @@ xsum = ["dep:xsum"]
 # Native Backtraces
 native-backtrace = []
 
+# JIT compilation via Cranelift
+jit = [
+    "dep:cranelift-codegen",
+    "dep:cranelift-frontend",
+    "dep:cranelift-jit",
+    "dep:cranelift-module",
+    "dep:cranelift-native",
+]
+
 [dependencies]
 tag_ptr.workspace = true
 boa_interner.workspace = true
@@ -190,6 +199,13 @@ tinystr = { workspace = true, optional = true }
 temporal_rs = { workspace = true, optional = true }
 timezone_provider = { workspace = true, optional = true }
 iana-time-zone = { workspace = true, optional = true }
+
+# jit deps
+cranelift-codegen = { workspace = true, optional = true }
+cranelift-frontend = { workspace = true, optional = true }
+cranelift-jit = { workspace = true, optional = true }
+cranelift-module = { workspace = true, optional = true }
+cranelift-native = { workspace = true, optional = true }
 
 [target.'cfg(all(target_family = "wasm", not(any(target_os = "emscripten", target_os = "wasi"))))'.dependencies]
 web-time = { workspace = true, optional = true }
