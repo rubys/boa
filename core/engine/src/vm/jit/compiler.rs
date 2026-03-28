@@ -367,20 +367,22 @@ impl JitCompiler {
             let ctx_ptr = builder.block_params(entry_block)[0];
             let reg_base_arg = builder.block_params(entry_block)[1];
 
-            // Allocate a stack slot to hold the reg_base pointer. This allows
-            // jit_call to update it after a callee returns (the stack Vec may
-            // have been reallocated during the call, invalidating the old pointer).
+            // Stack slot for jit_call to update reg_base after callee returns.
             let reg_base_slot = builder.create_sized_stack_slot(
                 cranelift_codegen::ir::StackSlotData::new(
                     cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                    8, // pointer size
-                    0,
+                    8, 0,
                 ),
             );
             builder.ins().stack_store(reg_base_arg, reg_base_slot, 0);
 
+            // Cranelift Variable for reg_base — handles SSA phi nodes
+            // automatically at block joins (loop headers, merge blocks).
+            let reg_base_var = builder.declare_var(self.ptr_type);
+            builder.def_var(reg_base_var, reg_base_arg);
+
             self.translate_body(
-                &mut builder, ctx_ptr, reg_base_slot, code, entry_block,
+                &mut builder, ctx_ptr, reg_base_var, reg_base_slot, code, entry_block,
             );
 
             builder.finalize();
@@ -405,12 +407,17 @@ impl JitCompiler {
     }
 
     /// Emit a call to a fallible helper (returns i64: 0=ok, nonzero=error).
-    /// On error, returns from the JIT function with error tag 2.
+    /// On error, jumps to error_block. On success, continues in a new block
+    /// and updates reg_base_var from the stack slot (the helper may have
+    /// triggered a Call that resized the VM stack).
     fn emit_fallible_call(
         builder: &mut FunctionBuilder<'_>,
         func_ref: cranelift_codegen::ir::FuncRef,
         args: &[Value],
         error_block: Block,
+        reg_base_var: cranelift_frontend::Variable,
+        reg_base_slot: cranelift_codegen::ir::StackSlot,
+        ptr_type: Type,
     ) {
         let result = builder.ins().call(func_ref, args);
         let tag = builder.inst_results(result)[0];
@@ -421,44 +428,34 @@ impl JitCompiler {
         builder.ins().brif(ok, continue_block, &[], error_block, &[]);
 
         builder.switch_to_block(continue_block);
-    }
-
-    /// Get the current register base pointer from the stack slot.
-    fn get_reg_base(
-        builder: &mut FunctionBuilder<'_>,
-        reg_base_slot: cranelift_codegen::ir::StackSlot,
-        ptr_type: Type,
-    ) -> Value {
-        builder.ins().stack_load(ptr_type, reg_base_slot, 0)
+        // Reload reg_base — the helper may have caused stack reallocation.
+        let new_base = builder.ins().stack_load(ptr_type, reg_base_slot, 0);
+        builder.def_var(reg_base_var, new_base);
     }
 
     /// Load a JsValue (u64) from the register file at the given index.
     fn load_reg(
         builder: &mut FunctionBuilder<'_>,
-        reg_base_slot: cranelift_codegen::ir::StackSlot,
-        ptr_type: Type,
+        reg_base: Value,
         index: u32,
     ) -> Value {
-        let base = Self::get_reg_base(builder, reg_base_slot, ptr_type);
         let offset = (index as i32) * 8;
         builder
             .ins()
-            .load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), base, offset)
+            .load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), reg_base, offset)
     }
 
     /// Store a JsValue (u64) to the register file at the given index.
     fn store_reg(
         builder: &mut FunctionBuilder<'_>,
-        reg_base_slot: cranelift_codegen::ir::StackSlot,
-        ptr_type: Type,
+        reg_base: Value,
         index: u32,
         value: Value,
     ) {
-        let base = Self::get_reg_base(builder, reg_base_slot, ptr_type);
         let offset = (index as i32) * 8;
         builder
             .ins()
-            .store(cranelift_codegen::ir::MemFlags::trusted(), value, base, offset);
+            .store(cranelift_codegen::ir::MemFlags::trusted(), value, reg_base, offset);
     }
 
     /// NaN-boxing constants for integer fast path.
@@ -472,6 +469,8 @@ impl JitCompiler {
         &self,
         builder: &mut FunctionBuilder<'_>,
         ctx_ptr: Value,
+        reg_base: Value,
+        reg_base_var: cranelift_frontend::Variable,
         reg_base_slot: cranelift_codegen::ir::StackSlot,
         dst: u32,
         lhs: u32,
@@ -480,8 +479,8 @@ impl JitCompiler {
         slow_ref: cranelift_codegen::ir::FuncRef,
         error_block: Block,
     ) {
-        let lhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, lhs);
-        let rhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, rhs);
+        let lhs_val = Self::load_reg(builder, reg_base, lhs);
+        let rhs_val = Self::load_reg(builder, reg_base, rhs);
 
         let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
         let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
@@ -512,14 +511,14 @@ impl JitCompiler {
         let mask32 = builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
         let result_masked = builder.ins().band(result_u64, mask32);
         let result_tagged = builder.ins().bor(result_masked, int_tag);
-        Self::store_reg(builder, reg_base_slot, self.ptr_type, dst, result_tagged);
+        Self::store_reg(builder, reg_base, dst, result_tagged);
         builder.ins().jump(merge_block, &[]);
 
         builder.switch_to_block(slow_block);
         let d = builder.ins().iconst(types::I32, i64::from(dst));
         let l = builder.ins().iconst(types::I32, i64::from(lhs));
         let r = builder.ins().iconst(types::I32, i64::from(rhs));
-        Self::emit_fallible_call(builder, slow_ref, &[ctx_ptr, d, l, r], error_block);
+        Self::emit_fallible_call(builder, slow_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
         builder.ins().jump(merge_block, &[]);
 
         builder.switch_to_block(merge_block);
@@ -530,6 +529,8 @@ impl JitCompiler {
         &self,
         builder: &mut FunctionBuilder<'_>,
         ctx_ptr: Value,
+        reg_base: Value,
+        reg_base_var: cranelift_frontend::Variable,
         reg_base_slot: cranelift_codegen::ir::StackSlot,
         dst: u32,
         lhs: u32,
@@ -538,8 +539,8 @@ impl JitCompiler {
         slow_ref: cranelift_codegen::ir::FuncRef,
         error_block: Block,
     ) {
-        let lhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, lhs);
-        let rhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, rhs);
+        let lhs_val = Self::load_reg(builder, reg_base, lhs);
+        let rhs_val = Self::load_reg(builder, reg_base, rhs);
 
         let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
         let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
@@ -565,14 +566,14 @@ impl JitCompiler {
         let mask32 = builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
         let result_masked = builder.ins().band(result_u64, mask32);
         let result_tagged = builder.ins().bor(result_masked, int_tag);
-        Self::store_reg(builder, reg_base_slot, self.ptr_type, dst, result_tagged);
+        Self::store_reg(builder, reg_base, dst, result_tagged);
         builder.ins().jump(merge_block, &[]);
 
         builder.switch_to_block(slow_block);
         let d = builder.ins().iconst(types::I32, i64::from(dst));
         let l = builder.ins().iconst(types::I32, i64::from(lhs));
         let r = builder.ins().iconst(types::I32, i64::from(rhs));
-        Self::emit_fallible_call(builder, slow_ref, &[ctx_ptr, d, l, r], error_block);
+        Self::emit_fallible_call(builder, slow_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
         builder.ins().jump(merge_block, &[]);
 
         builder.switch_to_block(merge_block);
@@ -585,6 +586,8 @@ impl JitCompiler {
         &self,
         builder: &mut FunctionBuilder<'_>,
         ctx_ptr: Value,
+        reg_base: Value,
+        reg_base_var: cranelift_frontend::Variable,
         reg_base_slot: cranelift_codegen::ir::StackSlot,
         dst: u32,
         lhs: u32,
@@ -593,8 +596,8 @@ impl JitCompiler {
         error_block: Block,
     ) {
         // Load raw u64 values from registers.
-        let lhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, lhs);
-        let rhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, rhs);
+        let lhs_val = Self::load_reg(builder, reg_base, lhs);
+        let rhs_val = Self::load_reg(builder, reg_base, rhs);
 
         // Check both are Integer32: (val & MASK_KIND) == MASK_INT32
         let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
@@ -631,7 +634,7 @@ impl JitCompiler {
         let int32_mask = builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
         let result_masked = builder.ins().band(result_u64, int32_mask);
         let result_tagged = builder.ins().bor(result_masked, int_tag);
-        Self::store_reg(builder, reg_base_slot, self.ptr_type, dst, result_tagged);
+        Self::store_reg(builder, reg_base, dst, result_tagged);
         builder.ins().jump(merge_block, &[]);
 
         // Overflow: promote to f64 and fall through to slow path.
@@ -662,6 +665,7 @@ impl JitCompiler {
         &mut self,
         builder: &mut FunctionBuilder<'_>,
         ctx_ptr: Value,
+        reg_base_var: cranelift_frontend::Variable,
         reg_base_slot: cranelift_codegen::ir::StackSlot,
         code: &CodeBlock,
         entry_block: Block,
@@ -768,10 +772,10 @@ impl JitCompiler {
                 continue;
             }
 
-            // Load reg_base once for this opcode. For simple opcodes this is
-            // the only load; for inlined fast paths with branches, the slow
-            // path reloads from the slot via load_reg/store_reg.
-            let base = Self::get_reg_base(builder, reg_base_slot, self.ptr_type);
+            // Read reg_base from the Cranelift Variable. This is a zero-cost
+            // SSA operation — Cranelift just returns the current SSA value.
+            // At loop headers, Cranelift inserts phi nodes automatically.
+            let reg_base = builder.use_var(reg_base_var);
 
             let i32const =
                 |builder: &mut FunctionBuilder<'_>, val: u32| -> Value {
@@ -782,30 +786,30 @@ impl JitCompiler {
                 Instruction::StoreZero { dst } => {
                     let tagged = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
                     let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, base, off);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
                 }
                 Instruction::StoreOne { dst } => {
                     let tagged = builder.ins().iconst(types::I64, (Self::MASK_INT32 | 1) as i64);
                     let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, base, off);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
                 }
                 Instruction::StoreInt8 { dst, value } => {
                     let tagged_val = Self::MASK_INT32 | ((value as u32) as u64 & 0xFFFF_FFFF);
                     let tagged = builder.ins().iconst(types::I64, tagged_val as i64);
                     let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, base, off);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
                 }
                 Instruction::StoreInt16 { dst, value } => {
                     let tagged_val = Self::MASK_INT32 | ((value as u32) as u64 & 0xFFFF_FFFF);
                     let tagged = builder.ins().iconst(types::I64, tagged_val as i64);
                     let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, base, off);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
                 }
                 Instruction::StoreInt32 { dst, value } => {
                     let tagged_val = Self::MASK_INT32 | ((value as u32) as u64 & 0xFFFF_FFFF);
                     let tagged = builder.ins().iconst(types::I64, tagged_val as i64);
                     let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, base, off);
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
                 }
                 Instruction::GetArgument { index, dst } => {
                     let idx = i32const(builder, u32::from(index));
@@ -817,9 +821,9 @@ impl JitCompiler {
                     // Optimized: single check — if EITHER value is a pointer type,
                     // branch to the slow path. Common case (both primitives) is one
                     // OR + one compare + one branch-not-taken.
-                    let old_dst = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(dst));
-                    let new_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(src));
-                    Self::store_reg(builder, reg_base_slot, self.ptr_type, u32::from(dst), new_val);
+                    let old_dst = Self::load_reg(builder, reg_base, u32::from(dst));
+                    let new_val = Self::load_reg(builder, reg_base, u32::from(src));
+                    Self::store_reg(builder, reg_base, u32::from(dst), new_val);
 
                     let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
                     let ptr_threshold = builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
@@ -879,21 +883,24 @@ impl JitCompiler {
                 }
                 Instruction::Add { dst, lhs, rhs } => {
                     self.emit_inlined_add(
-                        builder, ctx_ptr, reg_base_slot,
+                        builder, ctx_ptr, reg_base,
+                        reg_base_var, reg_base_slot,
                         u32::from(dst), u32::from(lhs), u32::from(rhs),
                         add_ref, error_block,
                     );
                 }
                 Instruction::Sub { dst, lhs, rhs } => {
                     self.emit_inlined_int_binop(
-                        builder, ctx_ptr, reg_base_slot,
+                        builder, ctx_ptr, reg_base,
+                        reg_base_var, reg_base_slot,
                         u32::from(dst), u32::from(lhs), u32::from(rhs),
                         IntBinOp::Sub, sub_ref, error_block,
                     );
                 }
                 Instruction::Mul { dst, lhs, rhs } => {
                     self.emit_inlined_int_binop(
-                        builder, ctx_ptr, reg_base_slot,
+                        builder, ctx_ptr, reg_base,
+                        reg_base_var, reg_base_slot,
                         u32::from(dst), u32::from(lhs), u32::from(rhs),
                         IntBinOp::Mul, mul_ref, error_block,
                     );
@@ -902,12 +909,12 @@ impl JitCompiler {
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, div_ref, &[ctx_ptr, d, l, r], error_block);
+                    Self::emit_fallible_call(builder, div_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::Mod { dst, lhs, rhs } => {
                     // Inline integer fast path for `%`.
-                    let lhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(lhs));
-                    let rhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(rhs));
+                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
+                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
                     let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
                     let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
                     let lt = builder.ins().band(lhs_val, mask);
@@ -948,14 +955,14 @@ impl JitCompiler {
                     let mask32 = builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
                     let result_masked = builder.ins().band(result_u64, mask32);
                     let result_tagged = builder.ins().bor(result_masked, int_tag);
-                    Self::store_reg(builder, reg_base_slot, self.ptr_type, u32::from(dst), result_tagged);
+                    Self::store_reg(builder, reg_base, u32::from(dst), result_tagged);
                     builder.ins().jump(merge_block, &[]);
 
                     builder.switch_to_block(slow_block);
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, mod_ref, &[ctx_ptr, d, l, r], error_block);
+                    Self::emit_fallible_call(builder, mod_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                     builder.ins().jump(merge_block, &[]);
 
                     builder.switch_to_block(merge_block);
@@ -964,12 +971,12 @@ impl JitCompiler {
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, pow_ref, &[ctx_ptr, d, l, r], error_block);
+                    Self::emit_fallible_call(builder, pow_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::BitOr { dst, lhs, rhs } => {
                     // Inline integer fast path for `|`.
-                    let lhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(lhs));
-                    let rhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(rhs));
+                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
+                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
                     let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
                     let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
                     let lhs_tag = builder.ins().band(lhs_val, mask);
@@ -993,7 +1000,7 @@ impl JitCompiler {
                     let mask32 = builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
                     let result_masked = builder.ins().band(result_u64, mask32);
                     let result_tagged = builder.ins().bor(result_masked, int_tag);
-                    Self::store_reg(builder, reg_base_slot, self.ptr_type, u32::from(dst), result_tagged);
+                    Self::store_reg(builder, reg_base, u32::from(dst), result_tagged);
                     builder.ins().jump(merge_block, &[]);
 
                     // Slow path.
@@ -1002,7 +1009,7 @@ impl JitCompiler {
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, bit_or_ref, &[ctx_ptr, d, l, r], error_block);
+                    Self::emit_fallible_call(builder, bit_or_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                     builder.ins().jump(merge_block, &[]);
 
                     builder.switch_to_block(merge_block);
@@ -1010,14 +1017,16 @@ impl JitCompiler {
                 }
                 Instruction::BitAnd { dst, lhs, rhs } => {
                     self.emit_inlined_int_bitop(
-                        builder, ctx_ptr, reg_base_slot,
+                        builder, ctx_ptr, reg_base,
+                        reg_base_var, reg_base_slot,
                         u32::from(dst), u32::from(lhs), u32::from(rhs),
                         IntBitOp::And, bit_and_ref, error_block,
                     );
                 }
                 Instruction::BitXor { dst, lhs, rhs } => {
                     self.emit_inlined_int_bitop(
-                        builder, ctx_ptr, reg_base_slot,
+                        builder, ctx_ptr, reg_base,
+                        reg_base_var, reg_base_slot,
                         u32::from(dst), u32::from(lhs), u32::from(rhs),
                         IntBitOp::Xor, bit_xor_ref, error_block,
                     );
@@ -1026,25 +1035,25 @@ impl JitCompiler {
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, shl_ref, &[ctx_ptr, d, l, r], error_block);
+                    Self::emit_fallible_call(builder, shl_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::ShiftRight { dst, lhs, rhs } => {
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, shr_ref, &[ctx_ptr, d, l, r], error_block);
+                    Self::emit_fallible_call(builder, shr_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::UnsignedShiftRight { dst, lhs, rhs } => {
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, ushr_ref, &[ctx_ptr, d, l, r], error_block);
+                    Self::emit_fallible_call(builder, ushr_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::StrictEq { dst, lhs, rhs } => {
                     // Inline: for integers, strict_equals is just u64 comparison.
                     // For non-integers (objects, strings), we need the helper.
-                    let lhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(lhs));
-                    let rhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(rhs));
+                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
+                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
                     let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
                     let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
                     let lt = builder.ins().band(lhs_val, mask);
@@ -1068,7 +1077,7 @@ impl JitCompiler {
                     let one = builder.ins().iconst(types::I64, 1);
                     let ext = builder.ins().uextend(types::I64, is_eq);
                     let result = builder.ins().bor(bool_false, ext);
-                    Self::store_reg(builder, reg_base_slot, self.ptr_type, u32::from(dst), result);
+                    Self::store_reg(builder, reg_base, u32::from(dst), result);
                     builder.ins().jump(merge_block, &[]);
 
                     // Slow: call helper for non-integer types.
@@ -1082,8 +1091,8 @@ impl JitCompiler {
                     builder.switch_to_block(merge_block);
                 }
                 Instruction::StrictNotEq { dst, lhs, rhs } => {
-                    let lhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(lhs));
-                    let rhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(rhs));
+                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
+                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
                     let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
                     let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
                     let lt = builder.ins().band(lhs_val, mask);
@@ -1104,7 +1113,7 @@ impl JitCompiler {
                     let bool_false = builder.ins().iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
                     let ext = builder.ins().uextend(types::I64, is_ne);
                     let result = builder.ins().bor(bool_false, ext);
-                    Self::store_reg(builder, reg_base_slot, self.ptr_type, u32::from(dst), result);
+                    Self::store_reg(builder, reg_base, u32::from(dst), result);
                     builder.ins().jump(merge_block, &[]);
 
                     builder.switch_to_block(slow_block);
@@ -1120,41 +1129,41 @@ impl JitCompiler {
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, eq_ref, &[ctx_ptr, d, l, r], error_block);
+                    Self::emit_fallible_call(builder, eq_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::NotEq { dst, lhs, rhs } => {
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, ne_ref, &[ctx_ptr, d, l, r], error_block);
+                    Self::emit_fallible_call(builder, ne_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::GreaterThan { dst, lhs, rhs } => {
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, gt_ref, &[ctx_ptr, d, l, r], error_block);
+                    Self::emit_fallible_call(builder, gt_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::GreaterThanOrEq { dst, lhs, rhs } => {
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, ge_ref, &[ctx_ptr, d, l, r], error_block);
+                    Self::emit_fallible_call(builder, ge_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::LessThan { dst, lhs, rhs } => {
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, lt_ref, &[ctx_ptr, d, l, r], error_block);
+                    Self::emit_fallible_call(builder, lt_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::LessThanOrEq { dst, lhs, rhs } => {
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, le_ref, &[ctx_ptr, d, l, r], error_block);
+                    Self::emit_fallible_call(builder, le_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::Inc { dst, src } => {
                     // Inline integer fast path for i++ (most common case).
-                    let src_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(src));
+                    let src_val = Self::load_reg(builder, reg_base, u32::from(src));
                     let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
                     let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
                     let src_tag = builder.ins().band(src_val, mask);
@@ -1190,8 +1199,8 @@ impl JitCompiler {
                     let inc_masked = builder.ins().band(inc_u64, mask32);
                     let inc_tagged = builder.ins().bor(inc_masked, int_tag);
                     // Inc writes original to src, incremented to dst.
-                    Self::store_reg(builder, reg_base_slot, self.ptr_type, u32::from(src), src_val);
-                    Self::store_reg(builder, reg_base_slot, self.ptr_type, u32::from(dst), inc_tagged);
+                    Self::store_reg(builder, reg_base, u32::from(src), src_val);
+                    Self::store_reg(builder, reg_base, u32::from(dst), inc_tagged);
                     builder.ins().jump(merge_block, &[]);
 
                     // Slow path.
@@ -1199,7 +1208,7 @@ impl JitCompiler {
             
                     let d = i32const(builder, u32::from(dst));
                     let s = i32const(builder, u32::from(src));
-                    Self::emit_fallible_call(builder, inc_ref, &[ctx_ptr, d, s], error_block);
+                    Self::emit_fallible_call(builder, inc_ref, &[ctx_ptr, d, s], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                     builder.ins().jump(merge_block, &[]);
 
                     builder.switch_to_block(merge_block);
@@ -1207,7 +1216,7 @@ impl JitCompiler {
                 }
                 Instruction::Dec { dst, src } => {
                     // Inline integer fast path for i-- (same pattern as Inc).
-                    let src_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(src));
+                    let src_val = Self::load_reg(builder, reg_base, u32::from(src));
                     let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
                     let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
                     let src_tag = builder.ins().band(src_val, mask);
@@ -1238,14 +1247,14 @@ impl JitCompiler {
                     let dec_masked = builder.ins().band(dec_u64, mask32);
                     let dec_tagged = builder.ins().bor(dec_masked, int_tag);
                     // Dec writes original to src, decremented to dst.
-                    Self::store_reg(builder, reg_base_slot, self.ptr_type, u32::from(src), src_val);
-                    Self::store_reg(builder, reg_base_slot, self.ptr_type, u32::from(dst), dec_tagged);
+                    Self::store_reg(builder, reg_base, u32::from(src), src_val);
+                    Self::store_reg(builder, reg_base, u32::from(dst), dec_tagged);
                     builder.ins().jump(merge_block, &[]);
 
                     builder.switch_to_block(slow_block);
                     let d = i32const(builder, u32::from(dst));
                     let s = i32const(builder, u32::from(src));
-                    Self::emit_fallible_call(builder, dec_ref, &[ctx_ptr, d, s], error_block);
+                    Self::emit_fallible_call(builder, dec_ref, &[ctx_ptr, d, s], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                     builder.ins().jump(merge_block, &[]);
 
                     builder.switch_to_block(merge_block);
@@ -1268,8 +1277,8 @@ impl JitCompiler {
                     let target = block_map[&address.as_u32()];
 
                     // Inline integer fast path.
-                    let lhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(lhs));
-                    let rhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(rhs));
+                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
+                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
 
                     let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
                     let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
@@ -1339,8 +1348,8 @@ impl JitCompiler {
                     // Actually, jit_le writes result to a register. We need a temp register
                     // approach, or a different helper. Let's just call the not_less_than helper
                     // logic but for <=. Let me inline it instead:
-                    let lhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(lhs));
-                    let rhs_val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(rhs));
+                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
+                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
                     let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
                     let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
                     let lhs_tag = builder.ins().band(lhs_val, mask);
@@ -1385,7 +1394,7 @@ impl JitCompiler {
                 Instruction::JumpIfTrue { address, value } => {
                     let target = block_map[&address.as_u32()];
                     // Inline: load the value, check NaN-boxing tag for boolean.
-                    let val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(value));
+                    let val = Self::load_reg(builder, reg_base, u32::from(value));
                     // Boolean true is 0x7FFA_0000_0000_0001, false is 0x7FFA_0000_0000_0000.
                     // Check if it's a boolean by comparing tag, then check low bit.
                     let bool_tag = builder.ins().iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
@@ -1450,7 +1459,7 @@ impl JitCompiler {
                 }
                 Instruction::JumpIfFalse { address, value } => {
                     let target = block_map[&address.as_u32()];
-                    let val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(value));
+                    let val = Self::load_reg(builder, reg_base, u32::from(value));
                     // Same logic as JumpIfTrue but inverted.
                     let bool_tag = builder.ins().iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
                     let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
@@ -1506,7 +1515,7 @@ impl JitCompiler {
                     let d = i32const(builder, u32::from(dst));
                     let b = i32const(builder, u32::from(binding_index));
                     Self::emit_fallible_call(
-                        builder, get_name_ref, &[ctx_ptr, d, b], error_block,
+                        builder, get_name_ref, &[ctx_ptr, d, b], error_block, reg_base_var, reg_base_slot, self.ptr_type,
                     );
                 }
                 Instruction::GetPropertyByName { dst, value, ic_index } => {
@@ -1514,7 +1523,7 @@ impl JitCompiler {
                     let o = i32const(builder, u32::from(value));
                     let ic = i32const(builder, u32::from(ic_index));
                     Self::emit_fallible_call(
-                        builder, get_prop_name_ref, &[ctx_ptr, d, o, ic], error_block,
+                        builder, get_prop_name_ref, &[ctx_ptr, d, o, ic], error_block, reg_base_var, reg_base_slot, self.ptr_type,
                     );
                 }
                 Instruction::GetLengthProperty { dst, value, ic_index } => {
@@ -1522,7 +1531,7 @@ impl JitCompiler {
                     let v = i32const(builder, u32::from(value));
                     let ic = i32const(builder, u32::from(ic_index));
                     Self::emit_fallible_call(
-                        builder, get_length_ref, &[ctx_ptr, d, v, ic], error_block,
+                        builder, get_length_ref, &[ctx_ptr, d, v, ic], error_block, reg_base_var, reg_base_slot, self.ptr_type,
                     );
                 }
                 Instruction::GetPropertyByValue { dst, key, receiver, object } => {
@@ -1531,7 +1540,7 @@ impl JitCompiler {
                     let r = i32const(builder, u32::from(receiver));
                     let o = i32const(builder, u32::from(object));
                     Self::emit_fallible_call(
-                        builder, get_prop_val_ref, &[ctx_ptr, d, k, r, o], error_block,
+                        builder, get_prop_val_ref, &[ctx_ptr, d, k, r, o], error_block, reg_base_var, reg_base_slot, self.ptr_type,
                     );
                 }
                 Instruction::GetPropertyByValuePush { dst, key, receiver, object } => {
@@ -1540,7 +1549,7 @@ impl JitCompiler {
                     let r = i32const(builder, u32::from(receiver));
                     let o = i32const(builder, u32::from(object));
                     Self::emit_fallible_call(
-                        builder, get_prop_val_push_ref, &[ctx_ptr, d, k, r, o], error_block,
+                        builder, get_prop_val_push_ref, &[ctx_ptr, d, k, r, o], error_block, reg_base_var, reg_base_slot, self.ptr_type,
                     );
                 }
                 Instruction::SetPropertyByValue { value, key, receiver, object } => {
@@ -1549,14 +1558,14 @@ impl JitCompiler {
                     let r = i32const(builder, u32::from(receiver));
                     let o = i32const(builder, u32::from(object));
                     Self::emit_fallible_call(
-                        builder, set_prop_val_ref, &[ctx_ptr, v, k, r, o], error_block,
+                        builder, set_prop_val_ref, &[ctx_ptr, v, k, r, o], error_block, reg_base_var, reg_base_slot, self.ptr_type,
                     );
                 }
                 Instruction::LogicalAnd { address, value } => {
                     // Identical to JumpIfFalse: if value is falsy, jump to address.
                     // The value stays in its register (short-circuit result).
                     let target = block_map[&address.as_u32()];
-                    let val = Self::load_reg(builder, reg_base_slot, self.ptr_type, u32::from(value));
+                    let val = Self::load_reg(builder, reg_base, u32::from(value));
 
                     // Fast path: check for boolean false.
                     let bool_tag = builder.ins().iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
@@ -1613,7 +1622,7 @@ impl JitCompiler {
                     let b = i32const(builder, u32::from(binding_index));
                     let ic = i32const(builder, u32::from(ic_index));
                     Self::emit_fallible_call(
-                        builder, get_name_global_ref, &[ctx_ptr, d, b, ic], error_block,
+                        builder, get_name_global_ref, &[ctx_ptr, d, b, ic], error_block, reg_base_var, reg_base_slot, self.ptr_type,
                     );
                 }
                 Instruction::Call { argument_count } => {
@@ -1624,14 +1633,14 @@ impl JitCompiler {
                         self.ptr_type, reg_base_slot, 0,
                     );
                     Self::emit_fallible_call(
-                        builder, call_ref, &[ctx_ptr, ac, slot_addr], error_block,
+                        builder, call_ref, &[ctx_ptr, ac, slot_addr], error_block, reg_base_var, reg_base_slot, self.ptr_type,
                     );
                 }
                 Instruction::CheckReturn => {
                     // Call helper to handle constructor return value logic.
                     // For non-constructors this is a fast no-op (checks one flag).
                     Self::emit_fallible_call(
-                        builder, check_return_ref, &[ctx_ptr], error_block,
+                        builder, check_return_ref, &[ctx_ptr], error_block, reg_base_var, reg_base_slot, self.ptr_type,
                     );
                 }
                 Instruction::Return => {
