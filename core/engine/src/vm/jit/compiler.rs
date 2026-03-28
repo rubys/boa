@@ -747,10 +747,60 @@ impl JitCompiler {
                     Self::emit_fallible_call(builder, div_ref, &[ctx_ptr, d, l, r], error_block);
                 }
                 Instruction::Mod { dst, lhs, rhs } => {
+                    // Inline integer fast path for `%`.
+                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
+                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
+                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
+                    let lt = builder.ins().band(lhs_val, mask);
+                    let rt = builder.ins().band(rhs_val, mask);
+                    let li = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lt, int_tag);
+                    let ri = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rt, int_tag);
+                    let both = builder.ins().band(li, ri);
+
+                    let fast_block = builder.create_block();
+                    let slow_block = builder.create_block();
+                    let merge_block = builder.create_block();
+                    builder.ins().brif(both, fast_block, &[], slow_block, &[]);
+
+                    builder.switch_to_block(fast_block);
+                    let lhs_i32 = builder.ins().ireduce(types::I32, lhs_val);
+                    let rhs_i32 = builder.ins().ireduce(types::I32, rhs_val);
+                    // Check for rhs == 0 (division by zero → slow path).
+                    let zero_i32 = builder.ins().iconst(types::I32, 0);
+                    let rhs_nonzero = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs_i32, zero_i32,
+                    );
+                    let rem_block = builder.create_block();
+                    builder.ins().brif(rhs_nonzero, rem_block, &[], slow_block, &[]);
+
+                    builder.switch_to_block(rem_block);
+                    // Also check for MIN % -1 overflow.
+                    let min_val = builder.ins().iconst(types::I32, i64::from(i32::MIN));
+                    let neg_one = builder.ins().iconst(types::I32, -1_i64);
+                    let is_min = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs_i32, min_val);
+                    let is_neg1 = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rhs_i32, neg_one);
+                    let is_overflow = builder.ins().band(is_min, is_neg1);
+                    let safe_block = builder.create_block();
+                    builder.ins().brif(is_overflow, slow_block, &[], safe_block, &[]);
+
+                    builder.switch_to_block(safe_block);
+                    let result = builder.ins().srem(lhs_i32, rhs_i32);
+                    let result_u64 = builder.ins().uextend(types::I64, result);
+                    let mask32 = builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
+                    let result_masked = builder.ins().band(result_u64, mask32);
+                    let result_tagged = builder.ins().bor(result_masked, int_tag);
+                    Self::store_reg(builder, reg_base, u32::from(dst), result_tagged);
+                    builder.ins().jump(merge_block, &[]);
+
+                    builder.switch_to_block(slow_block);
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
                     Self::emit_fallible_call(builder, mod_ref, &[ctx_ptr, d, l, r], error_block);
+                    builder.ins().jump(merge_block, &[]);
+
+                    builder.switch_to_block(merge_block);
                 }
                 Instruction::Pow { dst, lhs, rhs } => {
                     let d = i32const(builder, u32::from(dst));
@@ -833,16 +883,80 @@ impl JitCompiler {
                     Self::emit_fallible_call(builder, ushr_ref, &[ctx_ptr, d, l, r], error_block);
                 }
                 Instruction::StrictEq { dst, lhs, rhs } => {
+                    // Inline: for integers, strict_equals is just u64 comparison.
+                    // For non-integers (objects, strings), we need the helper.
+                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
+                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
+                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
+                    let lt = builder.ins().band(lhs_val, mask);
+                    let rt = builder.ins().band(rhs_val, mask);
+                    let li = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lt, int_tag);
+                    let ri = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rt, int_tag);
+                    let both = builder.ins().band(li, ri);
+
+                    let fast_block = builder.create_block();
+                    let slow_block = builder.create_block();
+                    let merge_block = builder.create_block();
+                    builder.ins().brif(both, fast_block, &[], slow_block, &[]);
+
+                    // Fast: compare the full u64 values.
+                    builder.switch_to_block(fast_block);
+                    let is_eq = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal, lhs_val, rhs_val,
+                    );
+                    // Boolean true = 0x7FFA_0000_0000_0001, false = 0x7FFA_0000_0000_0000
+                    let bool_false = builder.ins().iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
+                    let one = builder.ins().iconst(types::I64, 1);
+                    let ext = builder.ins().uextend(types::I64, is_eq);
+                    let result = builder.ins().bor(bool_false, ext);
+                    Self::store_reg(builder, reg_base, u32::from(dst), result);
+                    builder.ins().jump(merge_block, &[]);
+
+                    // Slow: call helper for non-integer types.
+                    builder.switch_to_block(slow_block);
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
                     builder.ins().call(strict_eq_ref, &[ctx_ptr, d, l, r]);
+                    builder.ins().jump(merge_block, &[]);
+
+                    builder.switch_to_block(merge_block);
                 }
                 Instruction::StrictNotEq { dst, lhs, rhs } => {
+                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
+                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
+                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
+                    let lt = builder.ins().band(lhs_val, mask);
+                    let rt = builder.ins().band(rhs_val, mask);
+                    let li = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lt, int_tag);
+                    let ri = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rt, int_tag);
+                    let both = builder.ins().band(li, ri);
+
+                    let fast_block = builder.create_block();
+                    let slow_block = builder.create_block();
+                    let merge_block = builder.create_block();
+                    builder.ins().brif(both, fast_block, &[], slow_block, &[]);
+
+                    builder.switch_to_block(fast_block);
+                    let is_ne = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs_val, rhs_val,
+                    );
+                    let bool_false = builder.ins().iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
+                    let ext = builder.ins().uextend(types::I64, is_ne);
+                    let result = builder.ins().bor(bool_false, ext);
+                    Self::store_reg(builder, reg_base, u32::from(dst), result);
+                    builder.ins().jump(merge_block, &[]);
+
+                    builder.switch_to_block(slow_block);
                     let d = i32const(builder, u32::from(dst));
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
                     builder.ins().call(strict_ne_ref, &[ctx_ptr, d, l, r]);
+                    builder.ins().jump(merge_block, &[]);
+
+                    builder.switch_to_block(merge_block);
                 }
                 Instruction::Eq { dst, lhs, rhs } => {
                     let d = i32const(builder, u32::from(dst));
@@ -934,9 +1048,49 @@ impl JitCompiler {
             
                 }
                 Instruction::Dec { dst, src } => {
+                    // Inline integer fast path for i-- (same pattern as Inc).
+                    let src_val = Self::load_reg(builder, reg_base, u32::from(src));
+                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
+                    let src_tag = builder.ins().band(src_val, mask);
+                    let is_int = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal, src_tag, int_tag,
+                    );
+
+                    let fast_block = builder.create_block();
+                    let slow_block = builder.create_block();
+                    let merge_block = builder.create_block();
+                    builder.ins().brif(is_int, fast_block, &[], slow_block, &[]);
+
+                    builder.switch_to_block(fast_block);
+                    let src_i32 = builder.ins().ireduce(types::I32, src_val);
+                    let min_val = builder.ins().iconst(types::I32, i64::from(i32::MIN));
+                    let not_min = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
+                        src_i32, min_val,
+                    );
+                    let dec_block = builder.create_block();
+                    builder.ins().brif(not_min, dec_block, &[], slow_block, &[]);
+
+                    builder.switch_to_block(dec_block);
+                    let one_i32 = builder.ins().iconst(types::I32, 1);
+                    let decremented = builder.ins().isub(src_i32, one_i32);
+                    let dec_u64 = builder.ins().uextend(types::I64, decremented);
+                    let mask32 = builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
+                    let dec_masked = builder.ins().band(dec_u64, mask32);
+                    let dec_tagged = builder.ins().bor(dec_masked, int_tag);
+                    // Dec writes original to src, decremented to dst.
+                    Self::store_reg(builder, reg_base, u32::from(src), src_val);
+                    Self::store_reg(builder, reg_base, u32::from(dst), dec_tagged);
+                    builder.ins().jump(merge_block, &[]);
+
+                    builder.switch_to_block(slow_block);
                     let d = i32const(builder, u32::from(dst));
                     let s = i32const(builder, u32::from(src));
                     Self::emit_fallible_call(builder, dec_ref, &[ctx_ptr, d, s], error_block);
+                    builder.ins().jump(merge_block, &[]);
+
+                    builder.switch_to_block(merge_block);
                 }
                 Instruction::IncrementLoopIteration => {
                     // Inline: just increment the counter. Skip the limit check
