@@ -141,7 +141,29 @@ fn unsupported_falls_back_to_interpreter() {
 
     let mut context = Context::default();
 
-    // Property access is not JIT-supported.
+    // typeof uses TypeOf opcode which is not JIT-supported.
+    let result = context.eval(Source::from_bytes(
+        "function check(x) { return typeof x; }
+         var r;
+         for (var i = 0; i < 20; i++) { r = check(42); }
+         r",
+    ));
+
+    let value = result.expect("should succeed");
+    let s = value
+        .as_string()
+        .expect("should be string")
+        .to_std_string_escaped();
+    assert_eq!(s, "number", "interpreted function should still work");
+}
+
+/// End-to-end: property access by name.
+#[test]
+fn end_to_end_jit_property_access() {
+    use crate::{Context, Source};
+
+    let mut context = Context::default();
+
     let result = context.eval(Source::from_bytes(
         "function get_x(obj) { return obj.x; }
          var r;
@@ -153,7 +175,7 @@ fn unsupported_falls_back_to_interpreter() {
     assert_eq!(
         value.as_number().expect("should be number"),
         42.0,
-        "interpreted function should still work"
+        "JIT'd property access should work"
     );
 }
 
