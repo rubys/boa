@@ -148,6 +148,13 @@ unsend = { version = "0.2.1", default-features = false }
 husky-rs = "0.3.2"
 async-channel = "2.5.0"
 
+# Cranelift JIT
+cranelift-codegen = { version = "0.130.0", default-features = false, features = ["std"] }
+cranelift-frontend = "0.130.0"
+cranelift-jit = "0.130.0"
+cranelift-module = "0.130.0"
+cranelift-native = "0.130.0"
+
 # ICU4X
 
 icu_provider = { version = "~2.1.1", default-features = false }
