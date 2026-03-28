@@ -877,16 +877,37 @@ impl Context {
     /// "clock cycles" have passed.
     #[allow(clippy::future_not_send)]
     pub(crate) async fn run_async_with_budget(&mut self, budget: u32) -> CompletionRecord {
+        // JIT: try to run the current frame's code block as native code.
+        #[cfg(feature = "jit")]
+        if let Some(record) = self.try_run_jit() {
+            return record;
+        }
+
         let mut runtime_budget: u32 = budget;
 
-        while let Some(byte) = self
-            .vm
-            .frame()
-            .code_block
-            .bytecode
-            .bytes
-            .get(self.vm.frame().pc as usize)
-        {
+        loop {
+            // JIT: when at pc==0 we've just entered a new frame.
+            #[cfg(feature = "jit")]
+            if self.vm.frame().pc == 0 {
+                if let Some(record) = self.try_run_jit() {
+                    match record {
+                        CompletionRecord::Normal(_) => continue,
+                        other => return other,
+                    }
+                }
+            }
+
+            let Some(byte) = self
+                .vm
+                .frame()
+                .code_block
+                .bytecode
+                .bytes
+                .get(self.vm.frame().pc as usize)
+            else {
+                return CompletionRecord::Throw(JsError::from_native(JsNativeError::error()));
+            };
+
             let opcode = Opcode::decode(*byte);
 
             match self.execute_one(
@@ -907,8 +928,6 @@ impl Context {
                 yield_now().await;
             }
         }
-
-        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
     }
 
     /// Number of calls before a function becomes eligible for JIT compilation.
@@ -928,6 +947,7 @@ impl Context {
 
         match state {
             JitState::Compiled(jit_fn) => {
+
                 Some(jit_fn.call(self))
             }
             JitState::Unsupported => {
@@ -953,10 +973,12 @@ impl Context {
 
                 match compiler.compile(&code) {
                     Some(jit_fn) => {
+
                         code.jit.set(JitState::Compiled(jit_fn));
                         Some(jit_fn.call(self))
                     }
                     None => {
+
                         code.jit.set(JitState::Unsupported);
                         None
                     }
@@ -972,14 +994,30 @@ impl Context {
             return record;
         }
 
-        while let Some(byte) = self
-            .vm
-            .frame()
-            .code_block
-            .bytecode
-            .bytes
-            .get(self.vm.frame().pc as usize)
-        {
+        loop {
+            // JIT: when at pc==0 we've just entered a new frame. Check if it
+            // should be JIT-compiled or already is.
+            #[cfg(feature = "jit")]
+            if self.vm.frame().pc == 0 {
+                if let Some(record) = self.try_run_jit() {
+                    match record {
+                        CompletionRecord::Normal(_) => continue,
+                        other => return other,
+                    }
+                }
+            }
+
+            let Some(byte) = self
+                .vm
+                .frame()
+                .code_block
+                .bytecode
+                .bytes
+                .get(self.vm.frame().pc as usize)
+            else {
+                return CompletionRecord::Throw(JsError::from_native(JsNativeError::error()));
+            };
+
             let opcode = Opcode::decode(*byte);
 
             match self.execute_one(
@@ -995,8 +1033,6 @@ impl Context {
                 ControlFlow::Break(value) => return value,
             }
         }
-
-        CompletionRecord::Throw(JsError::from_native(JsNativeError::error()))
     }
 
     /// Checks if we haven't exceeded the defined runtime limits.
