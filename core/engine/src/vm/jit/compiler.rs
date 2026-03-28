@@ -261,7 +261,7 @@ impl JitCompiler {
             ("jit_increment_loop_iteration", 0, true),
             ("jit_check_return", 0, true),
             ("jit_get_name_global", 3, true),
-            ("jit_call", 1, true),
+            // jit_call is declared separately (special signature with ptr param)
             ("jit_not_less_than", 2, true),
             ("jit_check_return_and_return", 0, true),
         ];
@@ -294,6 +294,19 @@ impl JitCompiler {
                 .declare_function("jit_drop_value", Linkage::Import, &sig)
                 .map_err(|e| e.to_string())?;
             funcs.insert("jit_drop_value", id);
+        }
+
+        // jit_call: (ctx: ptr, argument_count: i32, reg_base_ptr: ptr) -> i64
+        {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(ptr));     // ctx
+            sig.params.push(AbiParam::new(types::I32)); // argument_count
+            sig.params.push(AbiParam::new(ptr));     // reg_base_ptr
+            sig.returns.push(AbiParam::new(types::I64));
+            let id = module
+                .declare_function("jit_call", Linkage::Import, &sig)
+                .map_err(|e| e.to_string())?;
+            funcs.insert("jit_call", id);
         }
 
         Ok(HelperFuncs { funcs })
@@ -340,9 +353,23 @@ impl JitCompiler {
             builder.switch_to_block(entry_block);
 
             let ctx_ptr = builder.block_params(entry_block)[0];
-            let reg_base = builder.block_params(entry_block)[1];
+            let reg_base_arg = builder.block_params(entry_block)[1];
 
-            self.translate_body(&mut builder, ctx_ptr, reg_base, code, entry_block);
+            // Allocate a stack slot to hold the reg_base pointer. This allows
+            // jit_call to update it after a callee returns (the stack Vec may
+            // have been reallocated during the call, invalidating the old pointer).
+            let reg_base_slot = builder.create_sized_stack_slot(
+                cranelift_codegen::ir::StackSlotData::new(
+                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                    8, // pointer size
+                    0,
+                ),
+            );
+            builder.ins().stack_store(reg_base_arg, reg_base_slot, 0);
+
+            self.translate_body(
+                &mut builder, ctx_ptr, reg_base_arg, reg_base_slot, code, entry_block,
+            );
 
             builder.finalize();
         }
@@ -606,10 +633,15 @@ impl JitCompiler {
         &mut self,
         builder: &mut FunctionBuilder<'_>,
         ctx_ptr: Value,
-        reg_base: Value,
+        initial_reg_base: Value,
+        reg_base_slot: cranelift_codegen::ir::StackSlot,
         code: &CodeBlock,
         entry_block: Block,
     ) {
+        // reg_base tracks the current register base pointer. It starts as the
+        // function argument and gets reloaded from the stack slot after each
+        // Call instruction (since the callee may have caused a stack reallocation).
+        let mut reg_base = initial_reg_base;
         // Import all helper function references eagerly.
         macro_rules! declare_refs {
             ($($name:ident => $str:expr),* $(,)?) => {
@@ -1440,7 +1472,17 @@ impl JitCompiler {
                 }
                 Instruction::Call { argument_count } => {
                     let ac = i32const(builder, u32::from(argument_count));
-                    Self::emit_fallible_call(builder, call_ref, &[ctx_ptr, ac], error_block);
+                    // Pass the address of the reg_base stack slot so jit_call
+                    // can update it after the callee returns.
+                    let slot_addr = builder.ins().stack_addr(
+                        self.ptr_type, reg_base_slot, 0,
+                    );
+                    Self::emit_fallible_call(
+                        builder, call_ref, &[ctx_ptr, ac, slot_addr], error_block,
+                    );
+                    // Reload reg_base from the stack slot — it may have been
+                    // updated by jit_call if the stack Vec was reallocated.
+                    reg_base = builder.ins().stack_load(self.ptr_type, reg_base_slot, 0);
                 }
                 Instruction::CheckReturn => {
                     // Call helper to handle constructor return value logic.
