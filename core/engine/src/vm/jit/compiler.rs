@@ -179,6 +179,8 @@ impl JitCompiler {
             ("jit_le", helpers::jit_le as *const u8),
             ("jit_gt", helpers::jit_gt as *const u8),
             ("jit_ge", helpers::jit_ge as *const u8),
+            ("jit_get_name_global", helpers::jit_get_name_global as *const u8),
+            ("jit_call", helpers::jit_call as *const u8),
             ("jit_increment_loop_iteration", helpers::jit_increment_loop_iteration as *const u8),
             ("jit_not_less_than", helpers::jit_not_less_than as *const u8),
             ("jit_check_return_and_return", helpers::jit_check_return_and_return as *const u8),
@@ -239,6 +241,8 @@ impl JitCompiler {
             ("jit_gt", 3, true),
             ("jit_ge", 3, true),
             ("jit_increment_loop_iteration", 0, true),
+            ("jit_get_name_global", 3, true),
+            ("jit_call", 1, true),
             ("jit_not_less_than", 2, true),
             ("jit_check_return_and_return", 0, true),
         ];
@@ -604,6 +608,8 @@ impl JitCompiler {
             le_ref => "jit_le",
             gt_ref => "jit_gt",
             ge_ref => "jit_ge",
+            get_name_global_ref => "jit_get_name_global",
+            call_ref => "jit_call",
             not_lt_ref => "jit_not_less_than",
             ret_ref => "jit_check_return_and_return",
         }
@@ -1343,6 +1349,18 @@ impl JitCompiler {
                     builder.ins().brif(is_falsy, target, &[], cont_block, &[]);
 
                     builder.switch_to_block(cont_block);
+                }
+                Instruction::GetNameGlobal { dst, binding_index, ic_index } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let b = i32const(builder, u32::from(binding_index));
+                    let ic = i32const(builder, u32::from(ic_index));
+                    Self::emit_fallible_call(
+                        builder, get_name_global_ref, &[ctx_ptr, d, b, ic], error_block,
+                    );
+                }
+                Instruction::Call { argument_count } => {
+                    let ac = i32const(builder, u32::from(argument_count));
+                    Self::emit_fallible_call(builder, call_ref, &[ctx_ptr, ac], error_block);
                 }
                 Instruction::CheckReturn => {
                     // Handled with Return.
