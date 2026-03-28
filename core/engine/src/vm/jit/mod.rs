@@ -79,7 +79,9 @@ fn is_supported_opcode(opcode: Opcode) -> bool {
             | Opcode::JumpIfNotLessThan
             | Opcode::JumpIfNotLessThanOrEqual
             | Opcode::IncrementLoopIteration
-            // Property access
+            // Variable/property access
+            | Opcode::GetName
+            | Opcode::GetLengthProperty
             | Opcode::GetPropertyByValue
             | Opcode::GetPropertyByValuePush
             | Opcode::SetPropertyByValue

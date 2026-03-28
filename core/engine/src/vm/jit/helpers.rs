@@ -466,6 +466,108 @@ pub(super) extern "C" fn jit_set_property_by_value(
     }
 }
 
+/// `GetName` — look up a binding in the environment chain. Returns 0 on success, 1 on exception.
+pub(super) extern "C" fn jit_get_name(ctx: &mut Context, dst: u32, binding_index: u32) -> u64 {
+    let mut binding_locator =
+        ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
+
+    if let Err(err) = ctx.find_runtime_binding(&mut binding_locator) {
+        ctx.vm.pending_exception = Some(err);
+        return 1;
+    }
+
+    match ctx.get_binding(&binding_locator) {
+        Ok(Some(value)) => {
+            ctx.vm.set_register(dst as usize, value);
+            0
+        }
+        Ok(None) => {
+            let name = binding_locator.name().to_std_string_escaped();
+            ctx.vm.pending_exception = Some(
+                crate::JsNativeError::reference()
+                    .with_message(format!("{name} is not defined"))
+                    .into(),
+            );
+            1
+        }
+        Err(err) => {
+            ctx.vm.pending_exception = Some(err);
+            1
+        }
+    }
+}
+
+/// `GetPropertyByName` — `obj.prop` read. Returns 0 on success, 1 on exception.
+pub(super) extern "C" fn jit_get_property_by_name(
+    ctx: &mut Context,
+    dst: u32,
+    object: u32,
+    ic_index: u32,
+) -> u64 {
+    let object_val = ctx.vm.get_register(object as usize).clone();
+
+    let ic_len = ctx.vm.frame().code_block().ic.len();
+    if (ic_index as usize) >= ic_len {
+        eprintln!("[JIT] IC index out of bounds: ic_index={ic_index} ic_len={ic_len}");
+        ctx.vm.pending_exception = Some(
+            crate::JsNativeError::error()
+                .with_message("JIT: IC index out of bounds")
+                .into(),
+        );
+        return 1;
+    }
+
+    let result = (|| {
+        let key = ctx.vm.frame().code_block().ic[ic_index as usize]
+            .name
+            .clone();
+        let object_obj = object_val.to_object(ctx)?;
+        let key = crate::property::PropertyKey::from(key);
+        object_obj.__get__(&key, object_val, &mut ctx.into())
+    })();
+
+    match result {
+        Ok(value) => {
+            ctx.vm.set_register(dst as usize, value);
+            0
+        }
+        Err(err) => {
+            ctx.vm.pending_exception = Some(err);
+            1
+        }
+    }
+}
+
+/// `GetLengthProperty` — `obj.length` read (specialized). Returns 0 on success, 1 on exception.
+pub(super) extern "C" fn jit_get_length_property(
+    ctx: &mut Context,
+    dst: u32,
+    object: u32,
+    _ic_index: u32,
+) -> u64 {
+    // Simplified: just get the "length" property.
+    let object_val = ctx.vm.get_register(object as usize).clone();
+
+    let result = (|| {
+        let object_obj = object_val.to_object(ctx)?;
+        let key = crate::property::PropertyKey::from(
+            crate::JsString::from("length"),
+        );
+        object_obj.__get__(&key, object_val, &mut ctx.into())
+    })();
+
+    match result {
+        Ok(value) => {
+            ctx.vm.set_register(dst as usize, value);
+            0
+        }
+        Err(err) => {
+            ctx.vm.pending_exception = Some(err);
+            1
+        }
+    }
+}
+
 /// `GetNameGlobal` — look up a global binding. Returns 0 on success, 1 on exception.
 ///
 /// Implements: `GetNameGlobal { dst, binding_index, ic_index }`

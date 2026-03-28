@@ -196,6 +196,9 @@ impl JitCompiler {
             ("jit_le", helpers::jit_le as *const u8),
             ("jit_gt", helpers::jit_gt as *const u8),
             ("jit_ge", helpers::jit_ge as *const u8),
+            ("jit_get_name", helpers::jit_get_name as *const u8),
+            ("jit_get_property_by_name", helpers::jit_get_property_by_name as *const u8),
+            ("jit_get_length_property", helpers::jit_get_length_property as *const u8),
             ("jit_get_property_by_value", helpers::jit_get_property_by_value as *const u8),
             ("jit_get_property_by_value_push", helpers::jit_get_property_by_value_push as *const u8),
             ("jit_set_property_by_value", helpers::jit_set_property_by_value as *const u8),
@@ -261,6 +264,9 @@ impl JitCompiler {
             ("jit_le", 3, true),
             ("jit_gt", 3, true),
             ("jit_ge", 3, true),
+            ("jit_get_name", 2, true),
+            ("jit_get_property_by_name", 3, true),
+            ("jit_get_length_property", 3, true),
             ("jit_get_property_by_value", 4, true),
             ("jit_get_property_by_value_push", 4, true),
             ("jit_set_property_by_value", 4, true),
@@ -681,6 +687,9 @@ impl JitCompiler {
             le_ref => "jit_le",
             gt_ref => "jit_gt",
             ge_ref => "jit_ge",
+            get_name_ref => "jit_get_name",
+            get_prop_name_ref => "jit_get_property_by_name",
+            get_length_ref => "jit_get_length_property",
             get_prop_val_ref => "jit_get_property_by_value",
             get_prop_val_push_ref => "jit_get_property_by_value_push",
             set_prop_val_ref => "jit_set_property_by_value",
@@ -1471,6 +1480,29 @@ impl JitCompiler {
                     builder.ins().brif(is_falsy, target, &[], cont_block, &[]);
 
                     builder.switch_to_block(cont_block);
+                }
+                Instruction::GetName { dst, binding_index } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let b = i32const(builder, u32::from(binding_index));
+                    Self::emit_fallible_call(
+                        builder, get_name_ref, &[ctx_ptr, d, b], error_block,
+                    );
+                }
+                Instruction::GetPropertyByName { dst, value, ic_index } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let o = i32const(builder, u32::from(value));
+                    let ic = i32const(builder, u32::from(ic_index));
+                    Self::emit_fallible_call(
+                        builder, get_prop_name_ref, &[ctx_ptr, d, o, ic], error_block,
+                    );
+                }
+                Instruction::GetLengthProperty { dst, value, ic_index } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let v = i32const(builder, u32::from(value));
+                    let ic = i32const(builder, u32::from(ic_index));
+                    Self::emit_fallible_call(
+                        builder, get_length_ref, &[ctx_ptr, d, v, ic], error_block,
+                    );
                 }
                 Instruction::GetPropertyByValue { dst, key, receiver, object } => {
                     let d = i32const(builder, u32::from(dst));
