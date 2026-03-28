@@ -429,7 +429,26 @@ pub(super) extern "C" fn jit_get_name_global(
 /// This helper pushes the callee frame, executes it (which may trigger JIT
 /// compilation of the callee via the pc==0 check in the interpreter loop),
 /// and returns after the callee completes. The result is on the stack.
-pub(super) extern "C" fn jit_call(ctx: &mut Context, argument_count: u32) -> u64 {
+pub(super) extern "C" fn jit_call(
+    ctx: &mut Context,
+    argument_count: u32,
+    reg_base_ptr: *mut u64, // pointer to caller's reg_base stack slot
+) -> u64 {
+    let result = jit_call_inner(ctx, argument_count);
+
+    // Update the caller's reg_base pointer. The stack Vec may have been
+    // reallocated during the callee's execution (frame push resizes the stack).
+    // The caller will reload reg_base from this slot after we return.
+    let rp = ctx.vm.frame().rp as usize;
+    let new_base = ctx.vm.stack.stack[rp..].as_mut_ptr().cast::<u64>();
+    unsafe { reg_base_ptr.cast::<*mut u64>().write(new_base) };
+
+    result
+}
+
+fn jit_call_inner(ctx: &mut Context, argument_count: u32) -> u64 {
+    use crate::vm::call_frame::CallFrameFlags;
+
     let func = ctx
         .vm
         .stack
@@ -461,108 +480,29 @@ pub(super) extern "C" fn jit_call(ctx: &mut Context, argument_count: u32) -> u64
         }
     }
 
-    // Try to run the callee via JIT. This handles:
-    // 1. Already compiled → call JIT function directly (native call!)
-    // 2. Pending + threshold reached → compile and call
-    // 3. Pending + below threshold → fall through to interpreter
-    // 4. Unsupported → fall through to interpreter
-    #[cfg(feature = "jit")]
-    {
-        use crate::vm::code_block::JitState;
+    // Run the callee by delegating to the main interpreter loop's run().
+    // Set exit_early so run() returns after the callee completes.
+    ctx.vm.frame_mut().flags |= CallFrameFlags::EXIT_EARLY;
 
-        let code = ctx.vm.frame().code_block.clone();
-        let state = code.jit.get();
-
-        let jit_fn = match state {
-            JitState::Compiled(jit_fn) => Some(jit_fn),
-            JitState::Pending { call_count } => {
-                let new_count = call_count + 1;
-                if new_count >= crate::Context::JIT_THRESHOLD {
-                    let compiler = ctx
-                        .vm
-                        .jit_compiler
-                        .get_or_insert_with(|| {
-                            super::JitCompiler::new().expect("JIT compiler should initialize")
-                        });
-                    match compiler.compile(&code) {
-                        Some(f) => {
-                            code.jit.set(JitState::Compiled(f));
-                            Some(f)
-                        }
-                        None => {
-                            code.jit.set(JitState::Unsupported);
-                            None
-                        }
-                    }
-                } else {
-                    code.jit.set(JitState::Pending { call_count: new_count });
-                    None
-                }
-            }
-            JitState::Unsupported => None,
-        };
-
-        if let Some(jit_fn) = jit_fn {
-            // Direct native call to the callee's JIT function!
-            let rp = ctx.vm.frame().rp as usize;
-            let reg_base = ctx.vm.stack.stack[rp..].as_mut_ptr().cast::<u64>();
-            let tag = unsafe { jit_fn.call_raw(ctx as *mut Context, reg_base) };
-            return tag;
+    match ctx.run() {
+        crate::vm::CompletionRecord::Return(result) => {
+            // exit_early: handle_return truncated stack but didn't pop frame.
+            // Pop the callee's frame and push the result for the caller.
+            let frame = ctx.vm.frames.last().expect("callee frame must exist");
+            ctx.vm.stack.truncate_to_frame(frame);
+            ctx.vm.pop_frame();
+            ctx.vm.stack.push(result);
+            0
         }
-    }
-
-    // Fallback: run the callee frame via a mini interpreter loop.
-    let target_depth = ctx.vm.frames.len() - 1;
-    loop {
-        let Some(byte) = ctx
-            .vm
-            .frame()
-            .code_block
-            .bytecode
-            .bytes
-            .get(ctx.vm.frame().pc as usize)
-        else {
-            return 1;
-        };
-
-        let opcode = crate::vm::opcode::Opcode::decode(*byte);
-        use std::ops::ControlFlow;
-
-        let pc = ctx.vm.frame().pc as usize;
-        match crate::vm::opcode::OPCODE_HANDLERS[opcode as usize](ctx, pc) {
-            ControlFlow::Continue(()) => {
-                if ctx.vm.frames.len() <= target_depth + 1 {
-                    return 0;
-                }
-                // Check for JIT at frame boundaries in nested calls.
-                #[cfg(feature = "jit")]
-                if ctx.vm.frame().pc == 0 {
-                    if let Some(record) = ctx.try_run_jit() {
-                        match record {
-                            crate::vm::CompletionRecord::Normal(_) => {
-                                if ctx.vm.frames.len() <= target_depth + 1 {
-                                    return 0;
-                                }
-                                continue;
-                            }
-                            crate::vm::CompletionRecord::Return(_) => return 0,
-                            crate::vm::CompletionRecord::Throw(err) => {
-                                ctx.vm.pending_exception = Some(err);
-                                return 1;
-                            }
-                        }
-                    }
-                }
-            }
-            ControlFlow::Break(record) => {
-                match record {
-                    crate::vm::CompletionRecord::Throw(err) => {
-                        ctx.vm.pending_exception = Some(err);
-                        return 1;
-                    }
-                    _ => return 0,
-                }
-            }
+        crate::vm::CompletionRecord::Throw(err) => {
+            ctx.vm.pending_exception = Some(err);
+            // Frame may or may not be popped depending on where the throw happened.
+            // handle_throw() already unwinds frames. Just propagate.
+            1
+        }
+        crate::vm::CompletionRecord::Normal(_) => {
+            // Shouldn't happen with exit_early, but handle gracefully.
+            0
         }
     }
 }
@@ -639,6 +579,13 @@ pub(super) extern "C" fn jit_check_return_and_return(ctx: &mut Context) -> u64 {
     // Just do the Return: truncate stack, push result, pop frame.
     match ctx.handle_return() {
         ControlFlow::Continue(()) => 0,
+        ControlFlow::Break(crate::vm::CompletionRecord::Return(val)) => {
+            // exit_early case: handle_return took the return value and
+            // returned it in the CompletionRecord. Put it back so the
+            // caller (JitFn::call or jit_call) can find it.
+            ctx.vm.set_return_value(val);
+            1
+        }
         ControlFlow::Break(_) => 1,
     }
 }
