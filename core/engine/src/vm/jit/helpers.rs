@@ -9,6 +9,29 @@
 
 use crate::{Context, JsValue, value::JsVariant};
 
+/// Increment the refcount for a GC'd JsValue given its raw NaN-boxed u64.
+///
+/// Called by the JIT after copying a pointer-typed value to a new register.
+/// The caller has already checked that the tag indicates a pointer type.
+pub(super) extern "C" fn jit_clone_value(raw: u64) {
+    // Reconstruct the JsValue from the raw bits, clone it (bumps refcount),
+    // then forget both copies to avoid decrementing.
+    let val = unsafe { std::mem::transmute::<u64, JsValue>(raw) };
+    let _cloned = val.clone();
+    std::mem::forget(val);
+    std::mem::forget(_cloned);
+    // Net effect: refcount += 1 (clone increments, neither drop decrements).
+}
+
+/// Decrement the refcount for a GC'd JsValue given its raw NaN-boxed u64.
+///
+/// Called by the JIT when overwriting a register that held a pointer-typed value.
+pub(super) extern "C" fn jit_drop_value(raw: u64) {
+    // Reconstruct the JsValue and let it drop normally (decrements refcount).
+    let _val = unsafe { std::mem::transmute::<u64, JsValue>(raw) };
+    // _val drops here, decrementing the refcount.
+}
+
 /// Set register `dst` to integer 0.
 ///
 /// Implements: `StoreZero { dst }`

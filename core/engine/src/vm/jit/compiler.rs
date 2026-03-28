@@ -147,6 +147,8 @@ impl JitCompiler {
 
         // Register helper function symbols.
         let syms: &[(&str, *const u8)] = &[
+            ("jit_clone_value", helpers::jit_clone_value as *const u8),
+            ("jit_drop_value", helpers::jit_drop_value as *const u8),
             ("jit_store_zero", helpers::jit_store_zero as *const u8),
             ("jit_store_one", helpers::jit_store_one as *const u8),
             ("jit_store_int8", helpers::jit_store_int8 as *const u8),
@@ -263,6 +265,20 @@ impl JitCompiler {
             funcs.insert(name, id);
         }
 
+        // Special signatures: clone_value and drop_value take a single i64, no ctx pointer.
+        {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(types::I64));
+            let id = module
+                .declare_function("jit_clone_value", Linkage::Import, &sig)
+                .map_err(|e| e.to_string())?;
+            funcs.insert("jit_clone_value", id);
+            let id = module
+                .declare_function("jit_drop_value", Linkage::Import, &sig)
+                .map_err(|e| e.to_string())?;
+            funcs.insert("jit_drop_value", id);
+        }
+
         Ok(HelperFuncs { funcs })
     }
 
@@ -375,6 +391,8 @@ impl JitCompiler {
     /// NaN-boxing constants for integer fast path.
     const MASK_KIND: u64 = 0x7FFF_0000_0000_0000;
     const MASK_INT32: u64 = 0x7FF9_0000_0000_0000;
+    /// Pointer types (Object, String, Symbol, BigInt) have tags >= this value.
+    const MASK_OBJECT: u64 = 0x7FFC_0000_0000_0000;
 
     /// Integer binary operations that can be inlined with overflow check.
     fn emit_inlined_int_binop(
@@ -610,6 +628,8 @@ impl JitCompiler {
             ge_ref => "jit_ge",
             get_name_global_ref => "jit_get_name_global",
             call_ref => "jit_call",
+            clone_val_ref => "jit_clone_value",
+            drop_val_ref => "jit_drop_value",
             not_lt_ref => "jit_not_less_than",
             ret_ref => "jit_check_return_and_return",
         }
@@ -703,15 +723,57 @@ impl JitCompiler {
                     builder.ins().call(get_arg_ref, &[ctx_ptr, idx, d]);
                 }
                 Instruction::Move { dst, src } => {
-                    // For types currently supported by the JIT (which don't
-                    // include object/string/symbol/bigint creation), all register
-                    // values are primitives (integers, floats, undefined, null,
-                    // booleans). These are plain u64 copies — no refcount needed.
-                    //
-                    // When the JIT starts supporting object-producing opcodes,
-                    // this must be revisited to handle GC'd values properly.
-                    let val = Self::load_reg(builder, reg_base, u32::from(src));
-                    Self::store_reg(builder, reg_base, u32::from(dst), val);
+                    // GC-safe Move: raw u64 copy + refcount management for pointer types.
+                    // Optimized: single check — if EITHER value is a pointer type,
+                    // branch to the slow path. Common case (both primitives) is one
+                    // OR + one compare + one branch-not-taken.
+                    let old_dst = Self::load_reg(builder, reg_base, u32::from(dst));
+                    let new_val = Self::load_reg(builder, reg_base, u32::from(src));
+                    Self::store_reg(builder, reg_base, u32::from(dst), new_val);
+
+                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+                    let ptr_threshold = builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
+
+                    // OR the tags — if either is a pointer type, the result will be >= MASK_OBJECT.
+                    let new_tag = builder.ins().band(new_val, mask);
+                    let old_tag = builder.ins().band(old_dst, mask);
+                    let either_tag = builder.ins().bor(new_tag, old_tag);
+                    let either_is_ptr = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                        either_tag, ptr_threshold,
+                    );
+
+                    let gc_block = builder.create_block();
+                    let after_gc = builder.create_block();
+                    builder.ins().brif(either_is_ptr, gc_block, &[], after_gc, &[]);
+
+                    // Slow path: handle clone/drop individually.
+                    builder.switch_to_block(gc_block);
+                    let new_is_ptr = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                        new_tag, ptr_threshold,
+                    );
+                    let clone_block = builder.create_block();
+                    let check_drop = builder.create_block();
+                    builder.ins().brif(new_is_ptr, clone_block, &[], check_drop, &[]);
+
+                    builder.switch_to_block(clone_block);
+                    builder.ins().call(clone_val_ref, &[new_val]);
+                    builder.ins().jump(check_drop, &[]);
+
+                    builder.switch_to_block(check_drop);
+                    let old_is_ptr = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                        old_tag, ptr_threshold,
+                    );
+                    let drop_block = builder.create_block();
+                    builder.ins().brif(old_is_ptr, drop_block, &[], after_gc, &[]);
+
+                    builder.switch_to_block(drop_block);
+                    builder.ins().call(drop_val_ref, &[old_dst]);
+                    builder.ins().jump(after_gc, &[]);
+
+                    builder.switch_to_block(after_gc);
                 }
                 Instruction::SetAccumulator { src } => {
                     let s = i32const(builder, u32::from(src));
