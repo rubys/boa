@@ -81,6 +81,7 @@ fn is_supported_opcode(opcode: Opcode) -> bool {
             | Opcode::IncrementLoopIteration
             // Variable/property access
             | Opcode::GetName
+            | Opcode::GetPropertyByName
             | Opcode::GetLengthProperty
             | Opcode::GetPropertyByValue
             | Opcode::GetPropertyByValuePush
