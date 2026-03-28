@@ -387,9 +387,13 @@ impl JitCompiler {
         }
 
         let mut ctx = cranelift_codegen::Context::for_function(func);
-        self.module
-            .define_function(func_id, &mut ctx)
-            .expect("define function");
+        if let Err(_e) = self.module.define_function(func_id, &mut ctx) {
+            // Cranelift verification or compilation failed — fall back to interpreter.
+            // This can happen with complex control flow + register access patterns
+            // that create SSA domination issues.
+            self.module.clear_context(&mut ctx);
+            return None;
+        }
         self.module.clear_context(&mut ctx);
         self.module.finalize_definitions().expect("finalize");
 
