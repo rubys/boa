@@ -196,6 +196,9 @@ impl JitCompiler {
             ("jit_le", helpers::jit_le as *const u8),
             ("jit_gt", helpers::jit_gt as *const u8),
             ("jit_ge", helpers::jit_ge as *const u8),
+            ("jit_get_property_by_value", helpers::jit_get_property_by_value as *const u8),
+            ("jit_get_property_by_value_push", helpers::jit_get_property_by_value_push as *const u8),
+            ("jit_set_property_by_value", helpers::jit_set_property_by_value as *const u8),
             ("jit_check_return", helpers::jit_check_return as *const u8),
             ("jit_get_name_global", helpers::jit_get_name_global as *const u8),
             ("jit_call", helpers::jit_call as *const u8),
@@ -258,6 +261,9 @@ impl JitCompiler {
             ("jit_le", 3, true),
             ("jit_gt", 3, true),
             ("jit_ge", 3, true),
+            ("jit_get_property_by_value", 4, true),
+            ("jit_get_property_by_value_push", 4, true),
+            ("jit_set_property_by_value", 4, true),
             ("jit_increment_loop_iteration", 0, true),
             ("jit_check_return", 0, true),
             ("jit_get_name_global", 3, true),
@@ -675,6 +681,9 @@ impl JitCompiler {
             le_ref => "jit_le",
             gt_ref => "jit_gt",
             ge_ref => "jit_ge",
+            get_prop_val_ref => "jit_get_property_by_value",
+            get_prop_val_push_ref => "jit_get_property_by_value_push",
+            set_prop_val_ref => "jit_set_property_by_value",
             get_name_global_ref => "jit_get_name_global",
             call_ref => "jit_call",
             check_return_ref => "jit_check_return",
@@ -697,7 +706,8 @@ impl JitCompiler {
                     | Instruction::JumpIfTrue { address, .. }
                     | Instruction::JumpIfFalse { address, .. }
                     | Instruction::JumpIfNotLessThan { address, .. }
-                    | Instruction::JumpIfNotLessThanOrEqual { address, .. } => {
+                    | Instruction::JumpIfNotLessThanOrEqual { address, .. }
+                    | Instruction::LogicalAnd { address, .. } => {
                         Some(address.as_u32())
                     }
                     _ => None,
@@ -1445,6 +1455,89 @@ impl JitCompiler {
                     builder.ins().brif(is_int, int_check_block, &[], very_slow, &[]);
 
                     builder.switch_to_block(int_check_block);
+                    let val_i32 = builder.ins().ireduce(types::I32, val);
+                    let zero_i32 = builder.ins().iconst(types::I32, 0);
+                    let is_zero = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal, val_i32, zero_i32,
+                    );
+                    builder.ins().brif(is_zero, target, &[], cont_block, &[]);
+
+                    builder.switch_to_block(very_slow);
+                    let undef = builder.ins().iconst(types::I64, 0x7FFB_0000_0000_0001_u64 as i64);
+                    let null = builder.ins().iconst(types::I64, 0x7FFB_0000_0000_0000_u64 as i64);
+                    let is_undef = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, undef);
+                    let is_null = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, null);
+                    let is_falsy = builder.ins().bor(is_undef, is_null);
+                    builder.ins().brif(is_falsy, target, &[], cont_block, &[]);
+
+                    builder.switch_to_block(cont_block);
+                }
+                Instruction::GetPropertyByValue { dst, key, receiver, object } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let k = i32const(builder, u32::from(key));
+                    let r = i32const(builder, u32::from(receiver));
+                    let o = i32const(builder, u32::from(object));
+                    Self::emit_fallible_call(
+                        builder, get_prop_val_ref, &[ctx_ptr, d, k, r, o], error_block,
+                    );
+                }
+                Instruction::GetPropertyByValuePush { dst, key, receiver, object } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let k = i32const(builder, u32::from(key));
+                    let r = i32const(builder, u32::from(receiver));
+                    let o = i32const(builder, u32::from(object));
+                    Self::emit_fallible_call(
+                        builder, get_prop_val_push_ref, &[ctx_ptr, d, k, r, o], error_block,
+                    );
+                }
+                Instruction::SetPropertyByValue { value, key, receiver, object } => {
+                    let v = i32const(builder, u32::from(value));
+                    let k = i32const(builder, u32::from(key));
+                    let r = i32const(builder, u32::from(receiver));
+                    let o = i32const(builder, u32::from(object));
+                    Self::emit_fallible_call(
+                        builder, set_prop_val_ref, &[ctx_ptr, v, k, r, o], error_block,
+                    );
+                }
+                Instruction::LogicalAnd { address, value } => {
+                    // Identical to JumpIfFalse: if value is falsy, jump to address.
+                    // The value stays in its register (short-circuit result).
+                    let target = block_map[&address.as_u32()];
+                    let val = Self::load_reg(builder, reg_base, u32::from(value));
+
+                    // Fast path: check for boolean false.
+                    let bool_tag = builder.ins().iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
+                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+                    let val_tag = builder.ins().band(val, mask);
+                    let is_bool = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal, val_tag, bool_tag,
+                    );
+                    let fast_block = builder.create_block();
+                    let slow_block = builder.create_block();
+                    let cont_block = builder.create_block();
+                    builder.ins().brif(is_bool, fast_block, &[], slow_block, &[]);
+
+                    builder.switch_to_block(fast_block);
+                    let one = builder.ins().iconst(types::I64, 1);
+                    let low_bit = builder.ins().band(val, one);
+                    let zero64 = builder.ins().iconst(types::I64, 0);
+                    let is_false = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal, low_bit, zero64,
+                    );
+                    builder.ins().brif(is_false, target, &[], cont_block, &[]);
+
+                    // Slow: check integer 0, undefined, null.
+                    builder.switch_to_block(slow_block);
+                    let int_tag_v = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
+                    let val_tag2 = builder.ins().band(val, mask);
+                    let is_int = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal, val_tag2, int_tag_v,
+                    );
+                    let int_check = builder.create_block();
+                    let very_slow = builder.create_block();
+                    builder.ins().brif(is_int, int_check, &[], very_slow, &[]);
+
+                    builder.switch_to_block(int_check);
                     let val_i32 = builder.ins().ireduce(types::I32, val);
                     let zero_i32 = builder.ins().iconst(types::I32, 0);
                     let is_zero = builder.ins().icmp(

@@ -393,6 +393,79 @@ pub(super) extern "C" fn jit_not_less_than(ctx: &mut Context, lhs: u32, rhs: u32
     }
 }
 
+/// `GetPropertyByValue` — `obj[key]` read. Returns 0 on success, 1 on exception.
+pub(super) extern "C" fn jit_get_property_by_value(
+    ctx: &mut Context,
+    dst: u32,
+    key: u32,
+    receiver: u32,
+    object: u32,
+) -> u64 {
+    let key_val = ctx.vm.get_register(key as usize).clone();
+    let receiver_val = ctx.vm.get_register(receiver as usize).clone();
+    let object_val = ctx.vm.get_register(object as usize).clone();
+
+    let result = (|| {
+        let object = object_val.to_object(ctx)?;
+        let key = key_val.to_property_key(ctx)?;
+        object.__get__(&key, receiver_val, &mut ctx.into())
+    })();
+
+    match result {
+        Ok(value) => {
+            ctx.vm.set_register(dst as usize, value);
+            0
+        }
+        Err(err) => {
+            ctx.vm.pending_exception = Some(err);
+            1
+        }
+    }
+}
+
+/// `GetPropertyByValuePush` — `obj[key]` read, keeps object on stack for compound assignment.
+/// Returns 0 on success, 1 on exception.
+pub(super) extern "C" fn jit_get_property_by_value_push(
+    ctx: &mut Context,
+    dst: u32,
+    key: u32,
+    receiver: u32,
+    object: u32,
+) -> u64 {
+    // Same as GetPropertyByValue — the "push" variant in the interpreter
+    // pushes the object for a later SetPropertyByValue, but in the JIT
+    // the object stays in its register.
+    jit_get_property_by_value(ctx, dst, key, receiver, object)
+}
+
+/// `SetPropertyByValue` — `obj[key] = value`. Returns 0 on success, 1 on exception.
+pub(super) extern "C" fn jit_set_property_by_value(
+    ctx: &mut Context,
+    value: u32,
+    key: u32,
+    receiver: u32,
+    object: u32,
+) -> u64 {
+    let value_val = ctx.vm.get_register(value as usize).clone();
+    let key_val = ctx.vm.get_register(key as usize).clone();
+    let receiver_val = ctx.vm.get_register(receiver as usize).clone();
+    let object_val = ctx.vm.get_register(object as usize).clone();
+
+    let result = (|| {
+        let object = object_val.to_object(ctx)?;
+        let key = key_val.to_property_key(ctx)?;
+        object.__set__(key, value_val, receiver_val, &mut ctx.into())
+    })();
+
+    match result {
+        Ok(_) => 0,
+        Err(err) => {
+            ctx.vm.pending_exception = Some(err);
+            1
+        }
+    }
+}
+
 /// `GetNameGlobal` — look up a global binding. Returns 0 on success, 1 on exception.
 ///
 /// Implements: `GetNameGlobal { dst, binding_index, ic_index }`
