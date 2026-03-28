@@ -892,6 +892,13 @@ impl Context {
                 if let Some(record) = self.try_run_jit() {
                     match record {
                         CompletionRecord::Normal(_) => continue,
+                        CompletionRecord::Throw(err) => {
+                            self.vm.pending_exception = Some(err);
+                            match self.handle_throw() {
+                                ControlFlow::Continue(()) => continue,
+                                ControlFlow::Break(value) => return value,
+                            }
+                        }
                         other => return other,
                     }
                 }
@@ -1002,6 +1009,13 @@ impl Context {
                 if let Some(record) = self.try_run_jit() {
                     match record {
                         CompletionRecord::Normal(_) => continue,
+                        CompletionRecord::Throw(err) => {
+                            self.vm.pending_exception = Some(err);
+                            match self.handle_throw() {
+                                ControlFlow::Continue(()) => continue,
+                                ControlFlow::Break(value) => return value,
+                            }
+                        }
                         other => return other,
                     }
                 }
