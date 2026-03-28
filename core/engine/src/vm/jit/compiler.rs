@@ -187,6 +187,7 @@ impl JitCompiler {
             ("jit_le", helpers::jit_le as *const u8),
             ("jit_gt", helpers::jit_gt as *const u8),
             ("jit_ge", helpers::jit_ge as *const u8),
+            ("jit_check_return", helpers::jit_check_return as *const u8),
             ("jit_get_name_global", helpers::jit_get_name_global as *const u8),
             ("jit_call", helpers::jit_call as *const u8),
             ("jit_increment_loop_iteration", helpers::jit_increment_loop_iteration as *const u8),
@@ -249,6 +250,7 @@ impl JitCompiler {
             ("jit_gt", 3, true),
             ("jit_ge", 3, true),
             ("jit_increment_loop_iteration", 0, true),
+            ("jit_check_return", 0, true),
             ("jit_get_name_global", 3, true),
             ("jit_call", 1, true),
             ("jit_not_less_than", 2, true),
@@ -634,6 +636,7 @@ impl JitCompiler {
             ge_ref => "jit_ge",
             get_name_global_ref => "jit_get_name_global",
             call_ref => "jit_call",
+            check_return_ref => "jit_check_return",
             clone_val_ref => "jit_clone_value",
             drop_val_ref => "jit_drop_value",
             not_lt_ref => "jit_not_less_than",
@@ -1431,7 +1434,11 @@ impl JitCompiler {
                     Self::emit_fallible_call(builder, call_ref, &[ctx_ptr, ac], error_block);
                 }
                 Instruction::CheckReturn => {
-                    // Handled with Return.
+                    // Call helper to handle constructor return value logic.
+                    // For non-constructors this is a fast no-op (checks one flag).
+                    Self::emit_fallible_call(
+                        builder, check_return_ref, &[ctx_ptr], error_block,
+                    );
                 }
                 Instruction::Return => {
                     let result = builder.ins().call(ret_ref, &[ctx_ptr]);
