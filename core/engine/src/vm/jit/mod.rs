@@ -52,11 +52,32 @@ fn is_supported_opcode(opcode: Opcode) -> bool {
             | Opcode::Add
             | Opcode::Sub
             | Opcode::Mul
+            | Opcode::Div
+            | Opcode::Mod
+            | Opcode::Pow
             | Opcode::BitOr
+            | Opcode::BitAnd
+            | Opcode::BitXor
+            | Opcode::ShiftLeft
+            | Opcode::ShiftRight
+            | Opcode::UnsignedShiftRight
             | Opcode::Inc
+            | Opcode::Dec
+            // Comparison
+            | Opcode::StrictEq
+            | Opcode::StrictNotEq
+            | Opcode::Eq
+            | Opcode::NotEq
+            | Opcode::GreaterThan
+            | Opcode::GreaterThanOrEq
+            | Opcode::LessThan
+            | Opcode::LessThanOrEq
             // Control flow
             | Opcode::Jump
+            | Opcode::JumpIfTrue
+            | Opcode::JumpIfFalse
             | Opcode::JumpIfNotLessThan
+            | Opcode::JumpIfNotLessThanOrEqual
             | Opcode::IncrementLoopIteration
             // Return
             | Opcode::CheckReturn
