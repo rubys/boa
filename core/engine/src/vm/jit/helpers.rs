@@ -7,7 +7,7 @@
 //! As the JIT matures, many of these will be inlined into the generated code.
 //! For now, calling back into Rust is the simplest correct approach.
 
-use crate::{Context, JsValue};
+use crate::{Context, JsValue, value::JsVariant};
 
 /// Set register `dst` to integer 0.
 ///
@@ -76,6 +76,200 @@ pub(super) extern "C" fn jit_push_from_register(ctx: &mut Context, src: u32) {
 pub(super) extern "C" fn jit_pop_into_register(ctx: &mut Context, dst: u32) {
     let value = ctx.vm.stack.pop();
     ctx.vm.set_register(dst as usize, value);
+}
+
+/// Get the i-th function argument and store it in register `dst`.
+///
+/// Implements: `GetArgument { index, dst }`
+pub(super) extern "C" fn jit_get_argument(ctx: &mut Context, index: u32, dst: u32) {
+    let value = ctx
+        .vm
+        .stack
+        .get_argument(ctx.vm.frame(), index as usize)
+        .cloned()
+        .unwrap_or_default();
+    ctx.vm.set_register(dst as usize, value);
+}
+
+/// Binary `+` operator. Returns 0 on success, 1 on exception.
+///
+/// Implements: `Add { dst, lhs, rhs }`
+pub(super) extern "C" fn jit_add(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32) -> u64 {
+    let l = ctx.vm.get_register(lhs as usize);
+    let r = ctx.vm.get_register(rhs as usize);
+
+    // Fast path: try numeric add without cloning.
+    if let Some(value) = JsValue::add_fast(l, r) {
+        ctx.vm.set_register(dst as usize, value.into());
+        return 0;
+    }
+
+    // Slow path: full type coercion.
+    let l = l.clone();
+    let r = r.clone();
+    match l.add(&r, ctx) {
+        Ok(value) => {
+            ctx.vm.set_register(dst as usize, value.into());
+            0
+        }
+        Err(err) => {
+            ctx.vm.pending_exception = Some(err);
+            1
+        }
+    }
+}
+
+/// Binary `-` operator. Returns 0 on success, 1 on exception.
+///
+/// Implements: `Sub { dst, lhs, rhs }`
+pub(super) extern "C" fn jit_sub(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32) -> u64 {
+    let l = ctx.vm.get_register(lhs as usize);
+    let r = ctx.vm.get_register(rhs as usize);
+
+    if let Some(value) = JsValue::sub_fast(l, r) {
+        ctx.vm.set_register(dst as usize, value.into());
+        return 0;
+    }
+
+    let l = l.clone();
+    let r = r.clone();
+    match l.sub(&r, ctx) {
+        Ok(value) => {
+            ctx.vm.set_register(dst as usize, value.into());
+            0
+        }
+        Err(err) => {
+            ctx.vm.pending_exception = Some(err);
+            1
+        }
+    }
+}
+
+/// Binary `*` operator. Returns 0 on success, 1 on exception.
+pub(super) extern "C" fn jit_mul(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32) -> u64 {
+    let l = ctx.vm.get_register(lhs as usize);
+    let r = ctx.vm.get_register(rhs as usize);
+
+    if let Some(value) = JsValue::mul_fast(l, r) {
+        ctx.vm.set_register(dst as usize, value.into());
+        return 0;
+    }
+
+    let l = l.clone();
+    let r = r.clone();
+    match l.mul(&r, ctx) {
+        Ok(value) => {
+            ctx.vm.set_register(dst as usize, value.into());
+            0
+        }
+        Err(err) => {
+            ctx.vm.pending_exception = Some(err);
+            1
+        }
+    }
+}
+
+/// Binary `|` operator. Returns 0 on success, 1 on exception.
+pub(super) extern "C" fn jit_bit_or(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32) -> u64 {
+    let l = ctx.vm.get_register(lhs as usize);
+    let r = ctx.vm.get_register(rhs as usize);
+
+    if let Some(value) = JsValue::bitor_fast(l, r) {
+        ctx.vm.set_register(dst as usize, value.into());
+        return 0;
+    }
+
+    let l = l.clone();
+    let r = r.clone();
+    match l.bitor(&r, ctx) {
+        Ok(value) => {
+            ctx.vm.set_register(dst as usize, value.into());
+            0
+        }
+        Err(err) => {
+            ctx.vm.pending_exception = Some(err);
+            1
+        }
+    }
+}
+
+/// Unary `++` operator. Returns 0 on success, 1 on exception.
+///
+/// Implements: `Inc { dst, src }`
+/// Writes the original value back to `src` and the incremented value to `dst`.
+pub(super) extern "C" fn jit_inc(ctx: &mut Context, dst: u32, src: u32) -> u64 {
+    let value = ctx.vm.take_register(src as usize);
+
+    match value.variant() {
+        JsVariant::Integer32(number) if number < i32::MAX => {
+            ctx.vm.set_register(src as usize, JsValue::from(number));
+            ctx.vm.set_register(dst as usize, JsValue::from(number + 1));
+            0
+        }
+        _ => match value.to_numeric(ctx) {
+            Ok(crate::value::Numeric::Number(number)) => {
+                ctx.vm.set_register(src as usize, JsValue::from(number));
+                ctx.vm
+                    .set_register(dst as usize, JsValue::from(number + 1f64));
+                0
+            }
+            Ok(crate::value::Numeric::BigInt(bigint)) => {
+                ctx.vm
+                    .set_register(src as usize, JsValue::from(bigint.clone()));
+                ctx.vm.set_register(
+                    dst as usize,
+                    JsValue::from(crate::JsBigInt::add(&bigint, &crate::JsBigInt::one())),
+                );
+                0
+            }
+            Err(err) => {
+                ctx.vm.pending_exception = Some(err);
+                1
+            }
+        },
+    }
+}
+
+/// Increment the loop iteration counter. Returns 0 on success, 1 on limit exceeded.
+///
+/// Implements: `IncrementLoopIteration`
+pub(super) extern "C" fn jit_increment_loop_iteration(ctx: &mut Context) -> u64 {
+    let frame = ctx.vm.frame_mut();
+    frame.loop_iteration_count += 1;
+    let limit = ctx.vm.runtime_limits.loop_iteration_limit();
+    if limit > 0 && ctx.vm.frame().loop_iteration_count > limit {
+        ctx.vm.pending_exception = Some(
+            crate::error::RuntimeLimitError::LoopIteration.into(),
+        );
+        1
+    } else {
+        0
+    }
+}
+
+/// Compare `lhs < rhs` for JumpIfNotLessThan. Returns 1 if lhs >= rhs (should jump), 0 if lhs < rhs.
+/// Returns 2 on error.
+///
+/// Implements the condition check for: `JumpIfNotLessThan { lhs, rhs, address }`
+pub(super) extern "C" fn jit_not_less_than(ctx: &mut Context, lhs: u32, rhs: u32) -> u64 {
+    let l = ctx.vm.get_register(lhs as usize);
+    let r = ctx.vm.get_register(rhs as usize);
+
+    if let Some(result) = JsValue::lt_fast(l, r) {
+        return if result { 0 } else { 1 };
+    }
+
+    let l = l.clone();
+    let r = r.clone();
+    match l.lt(&r, ctx) {
+        Ok(result) => {
+            if result { 0 } else { 1 }
+        }
+        Err(err) => {
+            ctx.vm.pending_exception = Some(err);
+            2
+        }
+    }
 }
 
 /// CheckReturn + Return sequence.

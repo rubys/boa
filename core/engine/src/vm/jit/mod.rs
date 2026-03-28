@@ -36,15 +36,29 @@ pub(crate) fn can_compile(code: &CodeBlock) -> bool {
 fn is_supported_opcode(opcode: Opcode) -> bool {
     matches!(
         opcode,
+        // Data movement
         Opcode::Move
             | Opcode::StoreZero
             | Opcode::StoreOne
             | Opcode::StoreInt8
             | Opcode::StoreInt16
             | Opcode::StoreInt32
+            | Opcode::GetArgument
+            // Stack/accumulator
             | Opcode::SetAccumulator
             | Opcode::PushFromRegister
             | Opcode::PopIntoRegister
+            // Arithmetic
+            | Opcode::Add
+            | Opcode::Sub
+            | Opcode::Mul
+            | Opcode::BitOr
+            | Opcode::Inc
+            // Control flow
+            | Opcode::Jump
+            | Opcode::JumpIfNotLessThan
+            | Opcode::IncrementLoopIteration
+            // Return
             | Opcode::CheckReturn
             | Opcode::Return
     )

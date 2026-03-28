@@ -35,21 +35,22 @@ fn compile_trivial_function() {
 #[test]
 fn can_compile_rejects_unsupported() {
     use crate::vm::CodeBlock;
-    use crate::vm::opcode::{BytecodeEmitter, IndexOperand, RegisterOperand};
+    use crate::vm::opcode::{BytecodeEmitter, RegisterOperand};
     use boa_string::JsString;
 
+    // Pop is not in the supported set.
     let mut emitter = BytecodeEmitter::new();
-    emitter.emit_get_argument(IndexOperand::new(0), RegisterOperand::new(1));
+    emitter.emit_pop();
     emitter.emit_check_return();
     emitter.emit_return();
 
     let mut code = CodeBlock::new(JsString::from("test"), 0, false);
     code.bytecode = emitter.into_bytecode();
-    code.register_count = 2;
+    code.register_count = 1;
 
     assert!(
         !super::can_compile(&code),
-        "code with GetArgument should not be compilable yet"
+        "code with Pop should not be compilable"
     );
 
     let mut compiler = JitCompiler::new().expect("compiler should init");
@@ -83,14 +84,13 @@ fn end_to_end_jit_return_constant() {
     );
 }
 
-/// Verify that functions with unsupported opcodes still work via the interpreter.
+/// End-to-end: function with arguments and addition.
 #[test]
-fn unsupported_falls_back_to_interpreter() {
+fn end_to_end_jit_add() {
     use crate::{Context, Source};
 
     let mut context = Context::default();
 
-    // This function uses GetArgument + Add, which aren't JIT-supported yet.
     let result = context.eval(Source::from_bytes(
         "function add(a, b) { return a + b; }
          var r;
@@ -102,6 +102,57 @@ fn unsupported_falls_back_to_interpreter() {
     assert_eq!(
         value.as_number().expect("should be number"),
         3.0,
+        "JIT'd add function should return 3"
+    );
+}
+
+/// End-to-end: function with a loop (the first real benchmark target).
+#[test]
+fn end_to_end_jit_sum_loop() {
+    use crate::{Context, Source};
+
+    let mut context = Context::default();
+
+    let result = context.eval(Source::from_bytes(
+        "function sum(n) {
+           var s = 0;
+           for (var i = 0; i < n; i++) {
+             s = (s + i) | 0;
+           }
+           return s;
+         }
+         var r;
+         for (var j = 0; j < 20; j++) { r = sum(100); }
+         r",
+    ));
+
+    let value = result.expect("should succeed");
+    assert_eq!(
+        value.as_number().expect("should be number"),
+        4950.0,
+        "JIT'd sum(100) should return 4950"
+    );
+}
+
+/// Verify that functions with unsupported opcodes still work via the interpreter.
+#[test]
+fn unsupported_falls_back_to_interpreter() {
+    use crate::{Context, Source};
+
+    let mut context = Context::default();
+
+    // Property access is not JIT-supported.
+    let result = context.eval(Source::from_bytes(
+        "function get_x(obj) { return obj.x; }
+         var r;
+         for (var i = 0; i < 20; i++) { r = get_x({x: 42}); }
+         r",
+    ));
+
+    let value = result.expect("should succeed");
+    assert_eq!(
+        value.as_number().expect("should be number"),
+        42.0,
         "interpreted function should still work"
     );
 }

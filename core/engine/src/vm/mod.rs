@@ -928,15 +928,7 @@ impl Context {
 
         match state {
             JitState::Compiled(jit_fn) => {
-                // Call the JIT'd function directly.
-                match jit_fn(self) {
-                    ControlFlow::Continue(()) => {
-                        // The JIT function completed and pushed its result.
-                        // Continue with whatever the caller expects.
-                        None
-                    }
-                    ControlFlow::Break(record) => Some(record),
-                }
+                Some(jit_fn.call(self))
             }
             JitState::Unsupported => {
                 // Already tried and failed — fall through to interpreter.
@@ -962,11 +954,7 @@ impl Context {
                 match compiler.compile(&code) {
                     Some(jit_fn) => {
                         code.jit.set(JitState::Compiled(jit_fn));
-                        // Execute the freshly compiled function.
-                        match jit_fn(self) {
-                            ControlFlow::Continue(()) => None,
-                            ControlFlow::Break(record) => Some(record),
-                        }
+                        Some(jit_fn.call(self))
                     }
                     None => {
                         code.jit.set(JitState::Unsupported);
