@@ -193,6 +193,104 @@ pub(super) extern "C" fn jit_bit_or(ctx: &mut Context, dst: u32, lhs: u32, rhs: 
     }
 }
 
+/// Macro to generate binary op helpers with fast path.
+macro_rules! binop_helper {
+    ($name:ident, $fast_fn:ident, $slow_fn:ident) => {
+        pub(super) extern "C" fn $name(
+            ctx: &mut Context,
+            dst: u32,
+            lhs: u32,
+            rhs: u32,
+        ) -> u64 {
+            let l = ctx.vm.get_register(lhs as usize);
+            let r = ctx.vm.get_register(rhs as usize);
+
+            if let Some(value) = JsValue::$fast_fn(l, r) {
+                ctx.vm.set_register(dst as usize, value.into());
+                return 0;
+            }
+
+            let l = l.clone();
+            let r = r.clone();
+            match l.$slow_fn(&r, ctx) {
+                Ok(value) => {
+                    ctx.vm.set_register(dst as usize, value.into());
+                    0
+                }
+                Err(err) => {
+                    ctx.vm.pending_exception = Some(err);
+                    1
+                }
+            }
+        }
+    };
+}
+
+binop_helper!(jit_div, div_fast, div);
+binop_helper!(jit_mod, rem_fast, rem);
+binop_helper!(jit_pow, pow_fast, pow);
+binop_helper!(jit_bit_and, bitand_fast, bitand);
+binop_helper!(jit_bit_xor, bitxor_fast, bitxor);
+binop_helper!(jit_shl, shl_fast, shl);
+binop_helper!(jit_shr, shr_fast, shr);
+binop_helper!(jit_ushr, ushr_fast, ushr);
+binop_helper!(jit_lt, lt_fast, lt);
+binop_helper!(jit_le, le_fast, le);
+binop_helper!(jit_gt, gt_fast, gt);
+binop_helper!(jit_ge, ge_fast, ge);
+binop_helper!(jit_eq, equals_fast, equals);
+binop_helper!(jit_ne, not_equals_fast, not_equals);
+
+/// `StrictEq` — infallible, no slow path needed.
+pub(super) extern "C" fn jit_strict_eq(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32) {
+    let l = ctx.vm.get_register(lhs as usize);
+    let r = ctx.vm.get_register(rhs as usize);
+    let result = l.strict_equals(r);
+    ctx.vm.set_register(dst as usize, JsValue::from(result));
+}
+
+/// `StrictNotEq` — infallible.
+pub(super) extern "C" fn jit_strict_ne(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32) {
+    let l = ctx.vm.get_register(lhs as usize);
+    let r = ctx.vm.get_register(rhs as usize);
+    let result = !l.strict_equals(r);
+    ctx.vm.set_register(dst as usize, JsValue::from(result));
+}
+
+/// Unary `--` operator. Returns 0 on success, 1 on exception.
+pub(super) extern "C" fn jit_dec(ctx: &mut Context, dst: u32, src: u32) -> u64 {
+    let value = ctx.vm.take_register(src as usize);
+
+    match value.variant() {
+        JsVariant::Integer32(number) if number > i32::MIN => {
+            ctx.vm.set_register(src as usize, JsValue::from(number));
+            ctx.vm.set_register(dst as usize, JsValue::from(number - 1));
+            0
+        }
+        _ => match value.to_numeric(ctx) {
+            Ok(crate::value::Numeric::Number(number)) => {
+                ctx.vm.set_register(src as usize, JsValue::from(number));
+                ctx.vm
+                    .set_register(dst as usize, JsValue::from(number - 1f64));
+                0
+            }
+            Ok(crate::value::Numeric::BigInt(bigint)) => {
+                ctx.vm
+                    .set_register(src as usize, JsValue::from(bigint.clone()));
+                ctx.vm.set_register(
+                    dst as usize,
+                    JsValue::from(crate::JsBigInt::sub(&bigint, &crate::JsBigInt::one())),
+                );
+                0
+            }
+            Err(err) => {
+                ctx.vm.pending_exception = Some(err);
+                1
+            }
+        },
+    }
+}
+
 /// Unary `++` operator. Returns 0 on success, 1 on exception.
 ///
 /// Implements: `Inc { dst, src }`

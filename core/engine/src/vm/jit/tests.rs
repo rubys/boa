@@ -156,3 +156,43 @@ fn unsupported_falls_back_to_interpreter() {
         "interpreted function should still work"
     );
 }
+
+/// End-to-end: function with branches, modulo, strict equality, and decrement.
+#[test]
+fn end_to_end_jit_branchy_loop() {
+    use crate::{Context, Source};
+
+    let mut context = Context::default();
+
+    let result = context.eval(Source::from_bytes(
+        "function test(n) {
+           var count = 0;
+           for (var i = 0; i < n; i++) {
+             if (i % 3 === 0) count++;
+             else if (i % 5 === 0) count--;
+             else count = (count + i) | 0;
+           }
+           return count;
+         }
+         var r;
+         for (var j = 0; j < 20; j++) { r = test(100); }
+         r",
+    ));
+
+    let value = result.expect("should succeed");
+    // Verify against known result.
+    let expected: i32 = {
+        let mut count = 0i32;
+        for i in 0..100 {
+            if i % 3 == 0 { count += 1; }
+            else if i % 5 == 0 { count -= 1; }
+            else { count = count.wrapping_add(i); }
+        }
+        count
+    };
+    assert_eq!(
+        value.as_number().expect("should be number"),
+        f64::from(expected),
+        "JIT'd branchy function should produce correct result"
+    );
+}
