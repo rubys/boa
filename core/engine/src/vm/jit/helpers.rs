@@ -567,6 +567,64 @@ pub(super) extern "C" fn jit_call(ctx: &mut Context, argument_count: u32) -> u64
     }
 }
 
+/// `CheckReturn` — handles constructor return value logic.
+/// Returns 0 on success, 1 on exception.
+///
+/// For non-constructor calls this is a no-op. For constructors,
+/// it checks if the return value is an object (keep it) or not
+/// (return `this` instead), matching the interpreter's behavior.
+pub(super) extern "C" fn jit_check_return(ctx: &mut Context) -> u64 {
+    let frame = ctx.vm.frame();
+    if !frame.construct() {
+        return 0;
+    }
+
+    let this = ctx.vm.stack.get_this(frame).clone();
+    let result = ctx.vm.take_return_value();
+
+    if result.is_object() {
+        ctx.vm.set_return_value(result);
+        return 0;
+    }
+
+    if !this.is_undefined() {
+        ctx.vm.set_return_value(this);
+        return 0;
+    }
+
+    if !result.is_undefined() {
+        ctx.vm.pending_exception = Some(
+            crate::JsNativeError::typ()
+                .with_message("derived constructor can only return an Object or undefined")
+                .into(),
+        );
+        return 1;
+    }
+
+    // Need to get `this` from the environment for derived constructors.
+    let frame = ctx.vm.frame();
+    if frame.has_this_value_cached() {
+        ctx.vm.set_return_value(this);
+        return 0;
+    }
+
+    match ctx.vm.frame().environments.get_this_binding() {
+        Err(err) => {
+            ctx.vm.pending_exception = Some(err);
+            1
+        }
+        Ok(Some(this)) => {
+            ctx.vm.set_return_value(this);
+            0
+        }
+        Ok(None) => {
+            let this = ctx.realm().global_this().clone().into();
+            ctx.vm.set_return_value(this);
+            0
+        }
+    }
+}
+
 /// CheckReturn + Return sequence.
 ///
 /// Returns 0 for ControlFlow::Continue, 1 for ControlFlow::Break(Return).
@@ -577,16 +635,8 @@ pub(super) extern "C" fn jit_call(ctx: &mut Context, argument_count: u32) -> u64
 pub(super) extern "C" fn jit_check_return_and_return(ctx: &mut Context) -> u64 {
     use std::ops::ControlFlow;
 
-    // CheckReturn: for non-constructor calls this is a no-op.
-    // We only handle non-constructor for now.
-    let frame = ctx.vm.frame();
-    if frame.construct() {
-        // Fall back — this shouldn't happen since we don't JIT constructors yet,
-        // but be safe.
-        return 2; // signal error
-    }
-
-    // Return: truncate stack, push result, pop frame.
+    // CheckReturn is now handled by jit_check_return before this is called.
+    // Just do the Return: truncate stack, push result, pop frame.
     match ctx.handle_return() {
         ControlFlow::Continue(()) => 0,
         ControlFlow::Break(_) => 1,
