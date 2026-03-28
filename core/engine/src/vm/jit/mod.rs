@@ -79,6 +79,9 @@ fn is_supported_opcode(opcode: Opcode) -> bool {
             | Opcode::JumpIfNotLessThan
             | Opcode::JumpIfNotLessThanOrEqual
             | Opcode::IncrementLoopIteration
+            // Function calls
+            | Opcode::GetNameGlobal
+            | Opcode::Call
             // Return
             | Opcode::CheckReturn
             | Opcode::Return

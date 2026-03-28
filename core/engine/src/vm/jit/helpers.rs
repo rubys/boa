@@ -370,6 +370,134 @@ pub(super) extern "C" fn jit_not_less_than(ctx: &mut Context, lhs: u32, rhs: u32
     }
 }
 
+/// `GetNameGlobal` — look up a global binding. Returns 0 on success, 1 on exception.
+///
+/// Implements: `GetNameGlobal { dst, binding_index, ic_index }`
+pub(super) extern "C" fn jit_get_name_global(
+    ctx: &mut Context,
+    dst: u32,
+    binding_index: u32,
+    _ic_index: u32,
+) -> u64 {
+    // Simplified version: look up the binding via the runtime.
+    // TODO: use inline cache (ic_index) for faster lookups.
+    let mut binding_locator =
+        ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
+
+    if let Err(err) = ctx.find_runtime_binding(&mut binding_locator) {
+        ctx.vm.pending_exception = Some(err);
+        return 1;
+    }
+
+    match ctx.get_binding(&binding_locator) {
+        Ok(value) => {
+            ctx.vm.set_register(dst as usize, value.unwrap_or_default());
+            0
+        }
+        Err(err) => {
+            ctx.vm.pending_exception = Some(err);
+            1
+        }
+    }
+}
+
+/// `Call` — call a function and run it to completion. Returns 0 on success, 1 on exception.
+///
+/// This helper pushes the callee frame, executes it (which may trigger JIT
+/// compilation of the callee via the pc==0 check in the interpreter loop),
+/// and returns after the callee completes. The result is on the stack.
+pub(super) extern "C" fn jit_call(ctx: &mut Context, argument_count: u32) -> u64 {
+    let func = ctx
+        .vm
+        .stack
+        .calling_convention_get_function(argument_count as usize);
+
+    let Some(object) = func.as_object() else {
+        ctx.vm.pending_exception = Some(
+            crate::JsNativeError::typ()
+                .with_message("not a callable function")
+                .into(),
+        );
+        return 1;
+    };
+
+    // resolve() sets up the frame. If it returns Ok(true) = Complete,
+    // the result is already on the stack (native function).
+    // If Ok(false) = Ready, we need to run the frame.
+    match object.__call__(argument_count as usize).resolve(ctx) {
+        Ok(true) => {
+            // Native function completed, result on stack.
+            return 0;
+        }
+        Ok(false) => {
+            // Frame pushed, need to run it.
+        }
+        Err(err) => {
+            ctx.vm.pending_exception = Some(err);
+            return 1;
+        }
+    }
+
+    // Run until the callee frame completes.
+    // We track the frame depth and run the interpreter loop until it drops
+    // back to the current level.
+    let target_depth = ctx.vm.frames.len() - 1; // depth before the callee was pushed
+    loop {
+        // Check if the callee is JIT-compiled.
+        #[cfg(feature = "jit")]
+        if ctx.vm.frame().pc == 0 {
+            if let Some(record) = ctx.try_run_jit() {
+                match record {
+                    crate::vm::CompletionRecord::Normal(_) => {
+                        if ctx.vm.frames.len() <= target_depth + 1 {
+                            return 0;
+                        }
+                        continue;
+                    }
+                    crate::vm::CompletionRecord::Return(_) => return 0,
+                    crate::vm::CompletionRecord::Throw(err) => {
+                        ctx.vm.pending_exception = Some(err);
+                        return 1;
+                    }
+                }
+            }
+        }
+
+        let Some(byte) = ctx
+            .vm
+            .frame()
+            .code_block
+            .bytecode
+            .bytes
+            .get(ctx.vm.frame().pc as usize)
+        else {
+            return 1; // unexpected end of bytecode
+        };
+
+        let opcode = crate::vm::opcode::Opcode::decode(*byte);
+        use std::ops::ControlFlow;
+
+        let pc = ctx.vm.frame().pc as usize;
+        match crate::vm::opcode::OPCODE_HANDLERS[opcode as usize](ctx, pc) {
+            ControlFlow::Continue(()) => {
+                // Check if we've returned to the caller's frame.
+                if ctx.vm.frames.len() <= target_depth + 1 {
+                    return 0;
+                }
+            }
+            ControlFlow::Break(record) => {
+                match record {
+                    crate::vm::CompletionRecord::Throw(err) => {
+                        ctx.vm.pending_exception = Some(err);
+                        return 1;
+                    }
+                    _ => return 0,
+                }
+            }
+        }
+    }
+}
+
 /// CheckReturn + Return sequence.
 ///
 /// Returns 0 for ControlFlow::Continue, 1 for ControlFlow::Break(Return).

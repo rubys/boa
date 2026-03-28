@@ -196,3 +196,25 @@ fn end_to_end_jit_branchy_loop() {
         "JIT'd branchy function should produce correct result"
     );
 }
+
+/// End-to-end: recursive fibonacci with Call and GetNameGlobal.
+#[test]
+fn end_to_end_jit_fib() {
+    use crate::{Context, Source};
+
+    let mut context = Context::default();
+
+    let result = context.eval(Source::from_bytes(
+        "function fib(n) { if (n <= 1) return n; return fib(n-1) + fib(n-2); }
+         var r;
+         for (var j = 0; j < 20; j++) { r = fib(10); }
+         r",
+    ));
+
+    let value = result.expect("should succeed");
+    assert_eq!(
+        value.as_number().expect("should be number"),
+        55.0,
+        "JIT'd fib(10) should return 55"
+    );
+}
