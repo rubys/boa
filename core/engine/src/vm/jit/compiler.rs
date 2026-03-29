@@ -1796,14 +1796,13 @@ impl JitCompiler {
                     let is_gt = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, l32, r32);
                     builder.ins().brif(is_gt, cont_block, &[], target, &[]);
                     builder.switch_to_block(slow_block);
-                    // Slow: use gt helper then branch
-                    let d = i32const(builder, u32::from(lhs));
+                    // Slow: use gt helper then branch. Use register 0 as scratch for result.
+                    let scratch = i32const(builder, 0);
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, gt_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
-                    // gt_ref writes a boolean to dst (lhs register). Check it.
+                    Self::emit_fallible_call(builder, gt_ref, &[ctx_ptr, scratch, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                     let reg_base2 = builder.use_var(reg_base_var);
-                    let result = Self::load_reg(builder, reg_base2, u32::from(lhs));
+                    let result = Self::load_reg(builder, reg_base2, 0);
                     let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
                     let is_true = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, result, true_val);
                     builder.ins().brif(is_true, cont_block, &[], target, &[]);
@@ -1813,9 +1812,11 @@ impl JitCompiler {
                     let target = block_map[&address.as_u32()];
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, ge_ref, &[ctx_ptr, l, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                    // Write comparison result to register 0 (scratch) to avoid corrupting lhs.
+                    let scratch = i32const(builder, 0);
+                    Self::emit_fallible_call(builder, ge_ref, &[ctx_ptr, scratch, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                     let reg_base2 = builder.use_var(reg_base_var);
-                    let result = Self::load_reg(builder, reg_base2, u32::from(lhs));
+                    let result = Self::load_reg(builder, reg_base2, 0);
                     let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
                     let is_true = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, result, true_val);
                     let cont = builder.create_block();
@@ -1826,9 +1827,10 @@ impl JitCompiler {
                     let target = block_map[&address.as_u32()];
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, eq_ref, &[ctx_ptr, l, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                    let scratch = i32const(builder, 0);
+                    Self::emit_fallible_call(builder, eq_ref, &[ctx_ptr, scratch, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                     let reg_base2 = builder.use_var(reg_base_var);
-                    let result = Self::load_reg(builder, reg_base2, u32::from(lhs));
+                    let result = Self::load_reg(builder, reg_base2, 0);
                     let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
                     let is_true = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, result, true_val);
                     let cont = builder.create_block();
