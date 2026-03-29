@@ -9,35 +9,154 @@
 
 use crate::{Context, JsValue, value::JsVariant};
 
-/// Report the memory layout offsets needed for inline caching.
-#[cfg(test)]
-pub(super) fn report_ic_offsets() {
-    use crate::JsObject;
+/// Fixed offsets from GC pointer to object internals.
+/// These are verified by the `ic_layout_offsets` test.
+pub(super) const SHAPE_OFFSET: i32 = 32;     // GcPtr → PropertyMap.shape (enum start)
+pub(super) const SHAPE_PTR_OFFSET: i32 = 40; // GcPtr → Shape inner Gc pointer (discriminant + ptr)
+pub(super) const STORAGE_OFFSET: i32 = 64;  // GcPtr → PropertyMap.storage (Vec struct start)
+pub(super) const STORAGE_PTR_OFFSET: i32 = 72; // GcPtr → storage Vec data pointer (Vec layout: cap, ptr, len)
 
-    let obj = JsObject::with_null_proto();
-    let js_val = JsValue::from(obj.clone());
-    let raw_bits: u64 = unsafe { std::mem::transmute_copy(&js_val) };
+/// Perform an inline-cache property lookup using raw pointer arithmetic.
+/// This bypasses GcRefCell::borrow() for maximum speed.
+///
+/// Returns `Some(value)` if the IC hits, `None` if it misses.
+///
+/// # Safety
+/// The `nan_boxed_obj` must be a NaN-boxed object pointer (tag == MASK_OBJECT).
+/// The `cached_shape_ptr` must be a valid shape GcBox pointer from `to_addr_usize() - 16`.
+pub(super) unsafe fn ic_fast_get(
+    nan_boxed_obj: u64,
+    cached_shape_ptr: u64,
+    slot_index: u32,
+) -> Option<u64> {
+    // Extract 48-bit GC pointer from NaN-boxed object.
+    let gc_ptr = (nan_boxed_obj & 0x0000_FFFF_FFFF_FFFF) as *const u8;
+
+    // Read the shape's inner Gc pointer at gc_ptr + 40.
+    // This is the Gc<Inner> pointer (a NonNull<GcBox<Inner>>).
+    let shape_gc_ptr = *(gc_ptr.add(SHAPE_PTR_OFFSET as usize) as *const u64);
+
+    // Compare with the cached shape.
+    if shape_gc_ptr != cached_shape_ptr {
+        return None;
+    }
+
+    // IC hit! Read the storage Vec's data pointer at gc_ptr + 72.
+    // Vec layout on this platform is (capacity, ptr, len), so ptr is at +8 from Vec start.
+    let storage_data_ptr = *(gc_ptr.add(STORAGE_PTR_OFFSET as usize) as *const *const u64);
+
+    // Read the property value at storage[slot_index].
+    let value = *storage_data_ptr.add(slot_index as usize);
+
+    Some(value)
+}
+
+/// Verify the IC layout offsets and test the fast path.
+#[cfg(test)]
+pub(super) fn verify_ic_offsets_and_fast_path() {
+    use crate::{Context, JsObject, Source};
+
+    let mut ctx = Context::default();
+
+    // Create an object with a property, then verify the IC works.
+    let obj_val = ctx.eval(Source::from_bytes("({x: 42, y: 99})")).unwrap();
+    let raw_bits: u64 = unsafe { std::mem::transmute_copy(&obj_val) };
+
+    // Verify it's an object (tag == 0x7FFC)
+    let tag = raw_bits & 0x7FFF_0000_0000_0000;
+    assert_eq!(tag, 0x7FFC_0000_0000_0000, "should be object tag");
+
     let gc_ptr = (raw_bits & 0x0000_FFFF_FFFF_FFFF) as *const u8;
 
+    // Get the shape via the proper API for comparison.
+    let obj = obj_val.as_object().unwrap();
     let borrowed = obj.borrow();
-    let shape_ptr = &borrowed.properties().shape as *const _ as *const u8;
-    let storage_ptr = &borrowed.properties().storage as *const _ as *const u8;
 
-    let shape_offset = unsafe { shape_ptr.offset_from(gc_ptr) };
-    let storage_offset = unsafe { storage_ptr.offset_from(gc_ptr) };
+    // Verify offsets are correct.
+    let shape_struct_ptr = &borrowed.properties().shape as *const _ as *const u8;
+    let storage_struct_ptr = &borrowed.properties().storage as *const _ as *const u8;
+    let actual_shape_offset = unsafe { shape_struct_ptr.offset_from(gc_ptr) };
+    let actual_storage_offset = unsafe { storage_struct_ptr.offset_from(gc_ptr) };
+    assert_eq!(actual_shape_offset, SHAPE_OFFSET as isize, "shape offset mismatch");
+    assert_eq!(actual_storage_offset, STORAGE_OFFSET as isize, "storage offset mismatch");
 
-    eprintln!("=== JIT IC Layout ===");
-    eprintln!("gc_ptr: {gc_ptr:p}");
-    eprintln!("shape offset from gc_ptr: {shape_offset}");
-    eprintln!("storage offset from gc_ptr: {storage_offset}");
-    eprintln!("sizeof Shape: {}", size_of::<crate::object::shape::Shape>());
+    // Dump the raw bytes around the shape to understand the layout.
+    let shape_bytes = unsafe {
+        std::slice::from_raw_parts(shape_struct_ptr, 16)
+    };
+    eprintln!("Shape raw bytes: {:02x?}", shape_bytes);
 
-    // Check what shape.to_addr_usize() returns vs the raw bytes at the shape offset
-    let shape_addr = borrowed.properties().shape.to_addr_usize();
-    let raw_at_shape = unsafe { *(shape_ptr as *const usize) };
-    eprintln!("shape.to_addr_usize(): 0x{shape_addr:x}");
-    eprintln!("raw usize at shape offset: 0x{raw_at_shape:x}");
-    eprintln!("=== End IC Layout ===");
+    let shape_addr_usize = borrowed.properties().shape.to_addr_usize();
+    eprintln!("shape.to_addr_usize(): 0x{shape_addr_usize:x}");
+
+    // Find the shape pointer within the 16 bytes
+    let word0 = unsafe { *(shape_struct_ptr as *const u64) };
+    let word1 = unsafe { *(shape_struct_ptr.add(8) as *const u64) };
+    eprintln!("shape word0: 0x{word0:x}");
+    eprintln!("shape word1: 0x{word1:x}");
+
+    // Figure out which word contains the Gc pointer
+    let gc_header_size_guess = 16_u64;
+    let expected_gc_ptr_from_word0 = word0.wrapping_add(gc_header_size_guess);
+    let expected_gc_ptr_from_word1 = word1.wrapping_add(gc_header_size_guess);
+    eprintln!("word0 + 16 = 0x{expected_gc_ptr_from_word0:x}");
+    eprintln!("word1 + 16 = 0x{expected_gc_ptr_from_word1:x}");
+
+    let raw_shape_gc_ptr = if expected_gc_ptr_from_word0 as usize == shape_addr_usize {
+        eprintln!("Shape Gc pointer is at offset +0 (word0)");
+        word0
+    } else if expected_gc_ptr_from_word1 as usize == shape_addr_usize {
+        eprintln!("Shape Gc pointer is at offset +8 (word1)");
+        word1
+    } else {
+        panic!("Cannot find shape Gc pointer in Shape bytes");
+    };
+
+    // Verify the relationship: to_addr_usize = raw_gc_ptr + GcHeader_size
+    let gc_header_size = shape_addr_usize - (raw_shape_gc_ptr as usize);
+    eprintln!("GcHeader size: {gc_header_size}");
+    assert!(gc_header_size > 0 && gc_header_size <= 32, "unexpected GcHeader size");
+
+    // Verify storage Vec layout
+    let storage_vec_ptr = unsafe { gc_ptr.add(STORAGE_OFFSET as usize) };
+    // Vec data ptr is at offset +8 within the Vec (layout: cap, ptr, len)
+    let storage_data_ptr = unsafe { *(storage_vec_ptr.add(8) as *const *const u8) };
+    eprintln!("storage Vec at gc_ptr+{STORAGE_OFFSET}: {storage_vec_ptr:p}");
+    eprintln!("raw at storage+0: 0x{:x}", unsafe { *(storage_vec_ptr as *const u64) });
+    eprintln!("raw at storage+8: 0x{:x}", unsafe { *(storage_vec_ptr.add(8) as *const u64) });
+    eprintln!("raw at storage+16: 0x{:x}", unsafe { *(storage_vec_ptr.add(16) as *const u64) });
+    eprintln!("storage len: {}", borrowed.properties().storage.len());
+    let actual_data_ptr = borrowed.properties().storage.as_ptr() as *const u8;
+    eprintln!("actual Vec data ptr: {actual_data_ptr:p}");
+    eprintln!("actual Vec capacity: {}", borrowed.properties().storage.capacity());
+    assert_eq!(storage_data_ptr, actual_data_ptr, "storage data ptr mismatch");
+
+    // Now test the IC fast path: read property "x" at slot 0.
+    let proper_x = borrowed.properties().storage[0].clone();
+    assert_eq!(
+        proper_x.as_number().unwrap(),
+        42.0,
+        "storage[0] should be 42"
+    );
+
+    drop(borrowed);
+
+    // Test ic_fast_get with the cached shape pointer.
+    let result = unsafe { ic_fast_get(raw_bits, raw_shape_gc_ptr, 0) };
+    assert!(result.is_some(), "IC should hit");
+
+    // The returned u64 should be a NaN-boxed integer 42.
+    let result_val: JsValue = unsafe { std::mem::transmute(result.unwrap()) };
+    // Don't drop — we don't own the refcount.
+    let num = result_val.as_number();
+    std::mem::forget(result_val);
+    assert_eq!(num.unwrap(), 42.0, "IC fast path should return 42");
+
+    // Test with a wrong shape pointer — should miss.
+    let result = unsafe { ic_fast_get(raw_bits, 0xDEAD_BEEF, 0) };
+    assert!(result.is_none(), "IC should miss with wrong shape");
+
+    eprintln!("IC fast path verification passed!");
 }
 
 /// Increment the refcount for a GC'd JsValue given its raw NaN-boxed u64.

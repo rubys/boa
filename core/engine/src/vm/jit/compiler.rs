@@ -1519,12 +1519,128 @@ impl JitCompiler {
                     );
                 }
                 Instruction::GetPropertyByName { dst, value, ic_index } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let o = i32const(builder, u32::from(value));
-                    let ic = i32const(builder, u32::from(ic_index));
-                    Self::emit_fallible_call(
-                        builder, get_prop_name_ref, &[ctx_ptr, d, o, ic], error_block, reg_base_var, reg_base_slot, self.ptr_type,
-                    );
+                    // Try to inline the IC check at compile time.
+                    let ic_idx = u32::from(ic_index) as usize;
+                    let ic_entry = &code.ic[ic_idx];
+                    let cached = ic_entry.entries.borrow();
+                    let ic_data = cached.first().and_then(|e| {
+                        use crate::object::shape::slot::SlotAttributes;
+                        let shape = e.shape.upgrade()?;
+                        if e.slot.attributes.contains(SlotAttributes::NOT_CACHEABLE)
+                            || e.slot.attributes.contains(SlotAttributes::PROTOTYPE)
+                            || e.slot.attributes.has_get()
+                        {
+                            return None;
+                        }
+                        // Compute the raw GcBox pointer from to_addr_usize.
+                        let addr = shape.to_addr_usize();
+                        let gc_header_size = 16_usize;
+                        let raw_gc_ptr = addr - gc_header_size;
+                        Some((raw_gc_ptr as u64, e.slot.index as u32))
+                    });
+                    drop(cached);
+
+                    if let Some((cached_shape_ptr, slot_idx)) = ic_data {
+                        let reg_base = builder.use_var(reg_base_var);
+                        let obj_val = Self::load_reg(builder, reg_base, u32::from(value));
+
+                        // Check that value is an object (tag == 0x7FFC).
+                        let kind_mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+                        let obj_tag = builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
+                        let val_tag = builder.ins().band(obj_val, kind_mask);
+                        let is_obj = builder.ins().icmp(
+                            cranelift_codegen::ir::condcodes::IntCC::Equal, val_tag, obj_tag,
+                        );
+
+                        let obj_block = builder.create_block();
+                        let slow_block = builder.create_block();
+                        let merge_block = builder.create_block();
+                        builder.ins().brif(is_obj, obj_block, &[], slow_block, &[]);
+
+                        // Object confirmed. Extract pointer, check shape.
+                        builder.switch_to_block(obj_block);
+                        let ptr_mask = builder.ins().iconst(types::I64, 0x0000_FFFF_FFFF_FFFF_u64 as i64);
+                        let obj_ptr = builder.ins().band(obj_val, ptr_mask);
+
+                        // Load shape Gc pointer at obj_ptr + 40.
+                        let shape_val = builder.ins().load(
+                            types::I64, cranelift_codegen::ir::MemFlags::trusted(),
+                            obj_ptr, helpers::SHAPE_PTR_OFFSET,
+                        );
+                        let cached = builder.ins().iconst(types::I64, cached_shape_ptr as i64);
+                        let shape_match = builder.ins().icmp(
+                            cranelift_codegen::ir::condcodes::IntCC::Equal, shape_val, cached,
+                        );
+
+                        let fast_block = builder.create_block();
+                        builder.ins().brif(shape_match, fast_block, &[], slow_block, &[]);
+
+                        // IC hit! Load from storage[slot_idx].
+                        builder.switch_to_block(fast_block);
+                        let storage_data = builder.ins().load(
+                            types::I64, cranelift_codegen::ir::MemFlags::trusted(),
+                            obj_ptr, helpers::STORAGE_PTR_OFFSET,
+                        );
+                        let slot_off = (slot_idx as i32) * 8;
+                        let prop_val = builder.ins().load(
+                            types::I64, cranelift_codegen::ir::MemFlags::trusted(),
+                            storage_data, slot_off,
+                        );
+
+                        // GC: clone if pointer type, drop old dst if pointer type.
+                        let mask_k = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+                        let ptr_thresh = builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
+                        let new_tag = builder.ins().band(prop_val, mask_k);
+                        let new_is_ptr = builder.ins().icmp(
+                            cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                            new_tag, ptr_thresh,
+                        );
+                        let clone_blk = builder.create_block();
+                        let after_clone = builder.create_block();
+                        builder.ins().brif(new_is_ptr, clone_blk, &[], after_clone, &[]);
+
+                        builder.switch_to_block(clone_blk);
+                        builder.ins().call(clone_val_ref, &[prop_val]);
+                        builder.ins().jump(after_clone, &[]);
+
+                        builder.switch_to_block(after_clone);
+                        let old_dst = Self::load_reg(builder, reg_base, u32::from(dst));
+                        let old_tag = builder.ins().band(old_dst, mask_k);
+                        let old_is_ptr = builder.ins().icmp(
+                            cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                            old_tag, ptr_thresh,
+                        );
+                        let drop_blk = builder.create_block();
+                        let after_drop = builder.create_block();
+                        builder.ins().brif(old_is_ptr, drop_blk, &[], after_drop, &[]);
+
+                        builder.switch_to_block(drop_blk);
+                        builder.ins().call(drop_val_ref, &[old_dst]);
+                        builder.ins().jump(after_drop, &[]);
+
+                        builder.switch_to_block(after_drop);
+                        Self::store_reg(builder, reg_base, u32::from(dst), prop_val);
+                        builder.ins().jump(merge_block, &[]);
+
+                        // Slow path.
+                        builder.switch_to_block(slow_block);
+                        let d = i32const(builder, u32::from(dst));
+                        let o = i32const(builder, u32::from(value));
+                        let ic = i32const(builder, u32::from(ic_index));
+                        Self::emit_fallible_call(
+                            builder, get_prop_name_ref, &[ctx_ptr, d, o, ic], error_block, reg_base_var, reg_base_slot, self.ptr_type,
+                        );
+                        builder.ins().jump(merge_block, &[]);
+
+                        builder.switch_to_block(merge_block);
+                    } else {
+                        let d = i32const(builder, u32::from(dst));
+                        let o = i32const(builder, u32::from(value));
+                        let ic = i32const(builder, u32::from(ic_index));
+                        Self::emit_fallible_call(
+                            builder, get_prop_name_ref, &[ctx_ptr, d, o, ic], error_block, reg_base_var, reg_base_slot, self.ptr_type,
+                        );
+                    }
                 }
                 Instruction::GetLengthProperty { dst, value, ic_index } => {
                     let d = i32const(builder, u32::from(dst));
