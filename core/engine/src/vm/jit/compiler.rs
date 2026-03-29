@@ -202,6 +202,18 @@ impl JitCompiler {
             ("jit_get_property_by_value", helpers::jit_get_property_by_value as *const u8),
             ("jit_get_property_by_value_push", helpers::jit_get_property_by_value_push as *const u8),
             ("jit_set_property_by_value", helpers::jit_set_property_by_value as *const u8),
+            ("jit_this", helpers::jit_this as *const u8),
+            ("jit_neg", helpers::jit_neg as *const u8),
+            ("jit_pos", helpers::jit_pos as *const u8),
+            ("jit_bit_not", helpers::jit_bit_not as *const u8),
+            ("jit_logical_not", helpers::jit_logical_not as *const u8),
+            ("jit_type_of", helpers::jit_type_of as *const u8),
+            ("jit_is_object", helpers::jit_is_object as *const u8),
+            ("jit_instance_of", helpers::jit_instance_of as *const u8),
+            ("jit_value_not_null_or_undefined", helpers::jit_value_not_null_or_undefined as *const u8),
+            ("jit_throw", helpers::jit_throw as *const u8),
+            ("jit_get_function", helpers::jit_get_function as *const u8),
+            ("jit_new", helpers::jit_new as *const u8),
             ("jit_check_return", helpers::jit_check_return as *const u8),
             ("jit_get_name_global", helpers::jit_get_name_global as *const u8),
             ("jit_call", helpers::jit_call as *const u8),
@@ -270,10 +282,21 @@ impl JitCompiler {
             ("jit_get_property_by_value", 4, true),
             ("jit_get_property_by_value_push", 4, true),
             ("jit_set_property_by_value", 4, true),
+            ("jit_this", 1, false),           // (ctx, dst)
+            ("jit_neg", 1, true),             // (ctx, value) -> u64
+            ("jit_pos", 1, true),
+            ("jit_bit_not", 1, true),
+            ("jit_logical_not", 1, false),    // (ctx, value)
+            ("jit_type_of", 1, false),
+            ("jit_is_object", 1, false),
+            ("jit_instance_of", 3, true),
+            ("jit_value_not_null_or_undefined", 1, true),
+            ("jit_throw", 1, true),
+            ("jit_get_function", 2, false),   // (ctx, dst, index)
             ("jit_increment_loop_iteration", 0, true),
             ("jit_check_return", 0, true),
             ("jit_get_name_global", 3, true),
-            // jit_call is declared separately (special signature with ptr param)
+            // jit_call and jit_new are declared separately (special signature with ptr param)
             ("jit_not_less_than", 2, true),
             ("jit_check_return_and_return", 0, true),
         ];
@@ -308,17 +331,21 @@ impl JitCompiler {
             funcs.insert("jit_drop_value", id);
         }
 
-        // jit_call: (ctx: ptr, argument_count: i32, reg_base_ptr: ptr) -> i64
+        // jit_call and jit_new: (ctx: ptr, argument_count: i32, reg_base_ptr: ptr) -> i64
         {
             let mut sig = module.make_signature();
-            sig.params.push(AbiParam::new(ptr));     // ctx
-            sig.params.push(AbiParam::new(types::I32)); // argument_count
-            sig.params.push(AbiParam::new(ptr));     // reg_base_ptr
+            sig.params.push(AbiParam::new(ptr));
+            sig.params.push(AbiParam::new(types::I32));
+            sig.params.push(AbiParam::new(ptr));
             sig.returns.push(AbiParam::new(types::I64));
             let id = module
                 .declare_function("jit_call", Linkage::Import, &sig)
                 .map_err(|e| e.to_string())?;
             funcs.insert("jit_call", id);
+            let id = module
+                .declare_function("jit_new", Linkage::Import, &sig)
+                .map_err(|e| e.to_string())?;
+            funcs.insert("jit_new", id);
         }
 
         Ok(HelperFuncs { funcs })
@@ -389,10 +416,8 @@ impl JitCompiler {
         }
 
         let mut ctx = cranelift_codegen::Context::for_function(func);
-        if let Err(_e) = self.module.define_function(func_id, &mut ctx) {
+        if let Err(e) = self.module.define_function(func_id, &mut ctx) {
             // Cranelift verification or compilation failed — fall back to interpreter.
-            // This can happen with complex control flow + register access patterns
-            // that create SSA domination issues.
             self.module.clear_context(&mut ctx);
             return None;
         }
@@ -458,11 +483,22 @@ impl JitCompiler {
             .store(cranelift_codegen::ir::MemFlags::trusted(), value, reg_base, offset);
     }
 
-    /// NaN-boxing constants for integer fast path.
+    // NaN-boxing constants.
     const MASK_KIND: u64 = 0x7FFF_0000_0000_0000;
+    const MASK_NAN: u64 = 0x7FF0_0000_0000_0000;
     const MASK_INT32: u64 = 0x7FF9_0000_0000_0000;
+    const MASK_BOOLEAN: u64 = 0x7FFA_0000_0000_0000;
+    const MASK_OTHER: u64 = 0x7FFB_0000_0000_0000;
     /// Pointer types (Object, String, Symbol, BigInt) have tags >= this value.
     const MASK_OBJECT: u64 = 0x7FFC_0000_0000_0000;
+    // Specific constants.
+    const VALUE_NULL: u64 = 0x7FFB_0000_0000_0000;
+    const VALUE_UNDEFINED: u64 = 0x7FFB_0000_0000_0001;
+    const VALUE_FALSE: u64 = 0x7FFA_0000_0000_0000;
+    const VALUE_TRUE: u64 = 0x7FFA_0000_0000_0001;
+    const VALUE_NAN: u64 = 0x7FF8_0000_0000_0000;
+    const VALUE_POS_INF: u64 = 0x7FF0_0000_0000_0000;
+    const VALUE_NEG_INF: u64 = 0xFFF0_0000_0000_0000;
 
     /// Integer binary operations that can be inlined with overflow check.
     fn emit_inlined_int_binop(
@@ -714,6 +750,18 @@ impl JitCompiler {
             check_return_ref => "jit_check_return",
             clone_val_ref => "jit_clone_value",
             drop_val_ref => "jit_drop_value",
+            this_ref => "jit_this",
+            neg_ref => "jit_neg",
+            pos_ref => "jit_pos",
+            bit_not_ref => "jit_bit_not",
+            logical_not_ref => "jit_logical_not",
+            type_of_ref => "jit_type_of",
+            is_object_ref => "jit_is_object",
+            instance_of_ref => "jit_instance_of",
+            vnnou_ref => "jit_value_not_null_or_undefined",
+            throw_ref => "jit_throw",
+            get_func_ref => "jit_get_function",
+            new_ref => "jit_new",
             not_lt_ref => "jit_not_less_than",
             ret_ref => "jit_check_return_and_return",
         }
@@ -732,7 +780,15 @@ impl JitCompiler {
                     | Instruction::JumpIfFalse { address, .. }
                     | Instruction::JumpIfNotLessThan { address, .. }
                     | Instruction::JumpIfNotLessThanOrEqual { address, .. }
-                    | Instruction::LogicalAnd { address, .. } => {
+                    | Instruction::JumpIfNotGreaterThan { address, .. }
+                    | Instruction::JumpIfNotGreaterThanOrEqual { address, .. }
+                    | Instruction::JumpIfNotEqual { address, .. }
+                    | Instruction::JumpIfNullOrUndefined { address, .. }
+                    | Instruction::JumpIfNotUndefined { address, .. }
+                    | Instruction::Case { address, .. }
+                    | Instruction::LogicalAnd { address, .. }
+                    | Instruction::LogicalOr { address, .. }
+                    | Instruction::Coalesce { address, .. } => {
                         Some(address.as_u32())
                     }
                     _ => None,
@@ -811,6 +867,57 @@ impl JitCompiler {
                     let off = (u32::from(dst) as i32) * 8;
                     builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
                 }
+                Instruction::StoreFloat { dst, value } => {
+                    let bits = (value as f64).to_bits();
+                    let tagged = builder.ins().iconst(types::I64, bits as i64);
+                    let off = (u32::from(dst) as i32) * 8;
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
+                }
+                Instruction::StoreDouble { dst, value } => {
+                    let bits = value.to_bits();
+                    let tagged = builder.ins().iconst(types::I64, bits as i64);
+                    let off = (u32::from(dst) as i32) * 8;
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
+                }
+                Instruction::StoreNan { dst } => {
+                    let tagged = builder.ins().iconst(types::I64, Self::VALUE_NAN as i64);
+                    let off = (u32::from(dst) as i32) * 8;
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
+                }
+                Instruction::StorePositiveInfinity { dst } => {
+                    let tagged = builder.ins().iconst(types::I64, Self::VALUE_POS_INF as i64);
+                    let off = (u32::from(dst) as i32) * 8;
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
+                }
+                Instruction::StoreNegativeInfinity { dst } => {
+                    let tagged = builder.ins().iconst(types::I64, Self::VALUE_NEG_INF as i64);
+                    let off = (u32::from(dst) as i32) * 8;
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
+                }
+                Instruction::StoreNull { dst } => {
+                    let tagged = builder.ins().iconst(types::I64, Self::VALUE_NULL as i64);
+                    let off = (u32::from(dst) as i32) * 8;
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
+                }
+                Instruction::StoreTrue { dst } => {
+                    let tagged = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
+                    let off = (u32::from(dst) as i32) * 8;
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
+                }
+                Instruction::StoreFalse { dst } => {
+                    let tagged = builder.ins().iconst(types::I64, Self::VALUE_FALSE as i64);
+                    let off = (u32::from(dst) as i32) * 8;
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
+                }
+                Instruction::StoreUndefined { dst } => {
+                    let tagged = builder.ins().iconst(types::I64, Self::VALUE_UNDEFINED as i64);
+                    let off = (u32::from(dst) as i32) * 8;
+                    builder.ins().store(cranelift_codegen::ir::MemFlags::trusted(), tagged, reg_base, off);
+                }
+                Instruction::This { dst } => {
+                    let d = i32const(builder, u32::from(dst));
+                    builder.ins().call(this_ref, &[ctx_ptr, d]);
+                }
                 Instruction::GetArgument { index, dst } => {
                     let idx = i32const(builder, u32::from(index));
                     let d = i32const(builder, u32::from(dst));
@@ -880,6 +987,30 @@ impl JitCompiler {
                 Instruction::PopIntoRegister { dst } => {
                     let d = i32const(builder, u32::from(dst));
                     builder.ins().call(pop_reg_ref, &[ctx_ptr, d]);
+                }
+                Instruction::Pop => {
+                    // Pop discards the top value from the stack.
+                    // In JIT context this happens after Call results that are unused.
+                    // PopIntoRegister with a temp register works but wastes a register.
+                    // Just call stack.pop() via a trivial inline — but we can't call
+                    // Rust methods from IR. Use pop_into_register to register 0
+                    // (the undefined register) as a discard target.
+                    let d = i32const(builder, 0);
+                    builder.ins().call(pop_reg_ref, &[ctx_ptr, d]);
+                }
+                Instruction::SetRegisterFromAccumulator { dst } => {
+                    // Read the return_value (accumulator) and store to register.
+                    // This is the reverse of SetAccumulator.
+                    // SetAccumulator: register → return_value
+                    // SetRegisterFromAccumulator: return_value → register
+                    // We need a helper for this. For now, use set_acc_ref backwards...
+                    // Actually the simplest: reuse the get_return_value path.
+                    // The accumulator is ctx.vm.return_value. We need to read it.
+                    // Let's just add it as a simple helper call.
+                    // For now, mark as unsupported by using the error block.
+                    let err = builder.ins().iconst(types::I64, 2);
+                    builder.ins().return_(&[err]);
+                    terminated = true;
                 }
                 Instruction::Add { dst, lhs, rhs } => {
                     self.emit_inlined_add(
@@ -1160,6 +1291,40 @@ impl JitCompiler {
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
                     Self::emit_fallible_call(builder, le_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::InstanceOf { dst, lhs, rhs } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let l = i32const(builder, u32::from(lhs));
+                    let r = i32const(builder, u32::from(rhs));
+                    Self::emit_fallible_call(builder, instance_of_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::Neg { value } => {
+                    let v = i32const(builder, u32::from(value));
+                    Self::emit_fallible_call(builder, neg_ref, &[ctx_ptr, v], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::Pos { value } => {
+                    let v = i32const(builder, u32::from(value));
+                    Self::emit_fallible_call(builder, pos_ref, &[ctx_ptr, v], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::BitNot { value } => {
+                    let v = i32const(builder, u32::from(value));
+                    Self::emit_fallible_call(builder, bit_not_ref, &[ctx_ptr, v], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::LogicalNot { value } => {
+                    let v = i32const(builder, u32::from(value));
+                    builder.ins().call(logical_not_ref, &[ctx_ptr, v]);
+                }
+                Instruction::TypeOf { value } => {
+                    let v = i32const(builder, u32::from(value));
+                    builder.ins().call(type_of_ref, &[ctx_ptr, v]);
+                }
+                Instruction::IsObject { value } => {
+                    let v = i32const(builder, u32::from(value));
+                    builder.ins().call(is_object_ref, &[ctx_ptr, v]);
+                }
+                Instruction::ValueNotNullOrUndefined { src } => {
+                    let v = i32const(builder, u32::from(src));
+                    Self::emit_fallible_call(builder, vnnou_ref, &[ctx_ptr, v], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::Inc { dst, src } => {
                     // Inline integer fast path for i++ (most common case).
@@ -1510,6 +1675,170 @@ impl JitCompiler {
                     builder.ins().brif(is_falsy, target, &[], cont_block, &[]);
 
                     builder.switch_to_block(cont_block);
+                }
+                // --- New jump/comparison opcodes ---
+                Instruction::JumpIfNotGreaterThan { lhs, rhs, address } => {
+                    // Same as JumpIfNotLessThan but with > instead of <.
+                    // Jump if !(lhs > rhs), i.e. if lhs <= rhs.
+                    let target = block_map[&address.as_u32()];
+                    let reg_base = builder.use_var(reg_base_var);
+                    let lhs_off = (u32::from(lhs) as i32) * 8;
+                    let rhs_off = (u32::from(rhs) as i32) * 8;
+                    let lhs_val = builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), reg_base, lhs_off);
+                    let rhs_val = builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), reg_base, rhs_off);
+                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
+                    let lt = builder.ins().band(lhs_val, mask);
+                    let rt = builder.ins().band(rhs_val, mask);
+                    let li = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lt, int_tag);
+                    let ri = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rt, int_tag);
+                    let both = builder.ins().band(li, ri);
+                    let fast_block = builder.create_block();
+                    let slow_block = builder.create_block();
+                    let cont_block = builder.create_block();
+                    builder.ins().brif(both, fast_block, &[], slow_block, &[]);
+                    builder.switch_to_block(fast_block);
+                    let l32 = builder.ins().ireduce(types::I32, lhs_val);
+                    let r32 = builder.ins().ireduce(types::I32, rhs_val);
+                    let is_gt = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, l32, r32);
+                    builder.ins().brif(is_gt, cont_block, &[], target, &[]);
+                    builder.switch_to_block(slow_block);
+                    // Slow: use gt helper then branch
+                    let d = i32const(builder, u32::from(lhs));
+                    let l = i32const(builder, u32::from(lhs));
+                    let r = i32const(builder, u32::from(rhs));
+                    Self::emit_fallible_call(builder, gt_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                    // gt_ref writes a boolean to dst (lhs register). Check it.
+                    let reg_base2 = builder.use_var(reg_base_var);
+                    let result = Self::load_reg(builder, reg_base2, u32::from(lhs));
+                    let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
+                    let is_true = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, result, true_val);
+                    builder.ins().brif(is_true, cont_block, &[], target, &[]);
+                    builder.switch_to_block(cont_block);
+                }
+                Instruction::JumpIfNotGreaterThanOrEqual { lhs, rhs, address } => {
+                    let target = block_map[&address.as_u32()];
+                    let l = i32const(builder, u32::from(lhs));
+                    let r = i32const(builder, u32::from(rhs));
+                    Self::emit_fallible_call(builder, ge_ref, &[ctx_ptr, l, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                    let reg_base2 = builder.use_var(reg_base_var);
+                    let result = Self::load_reg(builder, reg_base2, u32::from(lhs));
+                    let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
+                    let is_true = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, result, true_val);
+                    let cont = builder.create_block();
+                    builder.ins().brif(is_true, cont, &[], target, &[]);
+                    builder.switch_to_block(cont);
+                }
+                Instruction::JumpIfNotEqual { lhs, rhs, address } => {
+                    let target = block_map[&address.as_u32()];
+                    let l = i32const(builder, u32::from(lhs));
+                    let r = i32const(builder, u32::from(rhs));
+                    Self::emit_fallible_call(builder, eq_ref, &[ctx_ptr, l, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                    let reg_base2 = builder.use_var(reg_base_var);
+                    let result = Self::load_reg(builder, reg_base2, u32::from(lhs));
+                    let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
+                    let is_true = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, result, true_val);
+                    let cont = builder.create_block();
+                    builder.ins().brif(is_true, cont, &[], target, &[]);
+                    builder.switch_to_block(cont);
+                }
+                Instruction::JumpIfNullOrUndefined { address, value } => {
+                    let target = block_map[&address.as_u32()];
+                    let reg_base = builder.use_var(reg_base_var);
+                    let val = Self::load_reg(builder, reg_base, u32::from(value));
+                    let null = builder.ins().iconst(types::I64, Self::VALUE_NULL as i64);
+                    let undef = builder.ins().iconst(types::I64, Self::VALUE_UNDEFINED as i64);
+                    let is_null = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, null);
+                    let is_undef = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, undef);
+                    let is_either = builder.ins().bor(is_null, is_undef);
+                    let cont = builder.create_block();
+                    builder.ins().brif(is_either, target, &[], cont, &[]);
+                    builder.switch_to_block(cont);
+                }
+                Instruction::JumpIfNotUndefined { address, value } => {
+                    let target = block_map[&address.as_u32()];
+                    let reg_base = builder.use_var(reg_base_var);
+                    let val = Self::load_reg(builder, reg_base, u32::from(value));
+                    let undef = builder.ins().iconst(types::I64, Self::VALUE_UNDEFINED as i64);
+                    let is_undef = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, undef);
+                    let cont = builder.create_block();
+                    builder.ins().brif(is_undef, cont, &[], target, &[]);
+                    builder.switch_to_block(cont);
+                }
+                Instruction::Case { address, value, condition } => {
+                    // StrictEq comparison + conditional jump.
+                    let target = block_map[&address.as_u32()];
+                    let reg_base = builder.use_var(reg_base_var);
+                    let v = Self::load_reg(builder, reg_base, u32::from(value));
+                    let c = Self::load_reg(builder, reg_base, u32::from(condition));
+                    let is_eq = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, v, c);
+                    let cont = builder.create_block();
+                    builder.ins().brif(is_eq, target, &[], cont, &[]);
+                    builder.switch_to_block(cont);
+                }
+                Instruction::LogicalOr { address, value } => {
+                    // If value is truthy, jump to address (short-circuit).
+                    // Same as JumpIfTrue.
+                    let target = block_map[&address.as_u32()];
+                    let reg_base = builder.use_var(reg_base_var);
+                    let val = Self::load_reg(builder, reg_base, u32::from(value));
+                    // Quick check: boolean true
+                    let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
+                    let is_true = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, true_val);
+                    let check_more = builder.create_block();
+                    let cont = builder.create_block();
+                    builder.ins().brif(is_true, target, &[], check_more, &[]);
+                    builder.switch_to_block(check_more);
+                    // Not boolean true — check for falsy values (false, 0, null, undefined)
+                    let false_val = builder.ins().iconst(types::I64, Self::VALUE_FALSE as i64);
+                    let null_val = builder.ins().iconst(types::I64, Self::VALUE_NULL as i64);
+                    let undef_val = builder.ins().iconst(types::I64, Self::VALUE_UNDEFINED as i64);
+                    let int_zero = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
+                    let is_false = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, false_val);
+                    let is_null = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, null_val);
+                    let is_undef = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, undef_val);
+                    let is_zero = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, int_zero);
+                    let f1 = builder.ins().bor(is_false, is_null);
+                    let f2 = builder.ins().bor(is_undef, is_zero);
+                    let is_falsy = builder.ins().bor(f1, f2);
+                    // If falsy → don't jump (continue). If truthy → jump.
+                    builder.ins().brif(is_falsy, cont, &[], target, &[]);
+                    builder.switch_to_block(cont);
+                }
+                Instruction::Coalesce { address, value } => {
+                    // Nullish coalescing: if value is NOT null/undefined, jump.
+                    let target = block_map[&address.as_u32()];
+                    let reg_base = builder.use_var(reg_base_var);
+                    let val = Self::load_reg(builder, reg_base, u32::from(value));
+                    let null = builder.ins().iconst(types::I64, Self::VALUE_NULL as i64);
+                    let undef = builder.ins().iconst(types::I64, Self::VALUE_UNDEFINED as i64);
+                    let is_null = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, null);
+                    let is_undef = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, undef);
+                    let is_nullish = builder.ins().bor(is_null, is_undef);
+                    let cont = builder.create_block();
+                    // If nullish → continue (evaluate right side). If not → jump (use left).
+                    builder.ins().brif(is_nullish, cont, &[], target, &[]);
+                    builder.switch_to_block(cont);
+                }
+                // --- Function ---
+                Instruction::GetFunction { dst, index } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let idx = i32const(builder, u32::from(index));
+                    builder.ins().call(get_func_ref, &[ctx_ptr, d, idx]);
+                }
+                Instruction::New { argument_count } => {
+                    let ac = i32const(builder, u32::from(argument_count));
+                    let slot_addr = builder.ins().stack_addr(
+                        self.ptr_type, reg_base_slot, 0,
+                    );
+                    Self::emit_fallible_call(
+                        builder, new_ref, &[ctx_ptr, ac, slot_addr], error_block, reg_base_var, reg_base_slot, self.ptr_type,
+                    );
+                }
+                // --- Error ---
+                Instruction::Throw { src } => {
+                    let s = i32const(builder, u32::from(src));
+                    Self::emit_fallible_call(builder, throw_ref, &[ctx_ptr, s], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::GetName { dst, binding_index } => {
                     let d = i32const(builder, u32::from(dst));

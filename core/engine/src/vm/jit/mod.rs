@@ -30,40 +30,52 @@ pub(crate) fn can_compile(code: &CodeBlock) -> bool {
 }
 
 /// The set of opcodes the JIT currently supports.
-///
-/// This list grows over time. When all opcodes in a function are supported,
-/// `can_compile` returns `true` and the function becomes eligible for JIT.
 fn is_supported_opcode(opcode: Opcode) -> bool {
     matches!(
         opcode,
-        // Data movement
+        // === Data movement / constants ===
         Opcode::Move
             | Opcode::StoreZero
             | Opcode::StoreOne
             | Opcode::StoreInt8
             | Opcode::StoreInt16
             | Opcode::StoreInt32
+            | Opcode::StoreFloat
+            | Opcode::StoreDouble
+            | Opcode::StoreNan
+            | Opcode::StorePositiveInfinity
+            | Opcode::StoreNegativeInfinity
+            | Opcode::StoreNull
+            | Opcode::StoreTrue
+            | Opcode::StoreFalse
+            | Opcode::StoreUndefined
             | Opcode::GetArgument
-            // Stack/accumulator
+            | Opcode::This
+            // === Stack / accumulator ===
             | Opcode::SetAccumulator
             | Opcode::PushFromRegister
             | Opcode::PopIntoRegister
-            // Arithmetic
+            | Opcode::Pop
+            // === Arithmetic ===
             | Opcode::Add
             | Opcode::Sub
             | Opcode::Mul
             | Opcode::Div
             | Opcode::Mod
             | Opcode::Pow
+            | Opcode::Neg
+            | Opcode::Pos
+            | Opcode::Inc
+            | Opcode::Dec
+            // === Bitwise ===
             | Opcode::BitOr
             | Opcode::BitAnd
             | Opcode::BitXor
+            | Opcode::BitNot
             | Opcode::ShiftLeft
             | Opcode::ShiftRight
             | Opcode::UnsignedShiftRight
-            | Opcode::Inc
-            | Opcode::Dec
-            // Comparison
+            // === Comparison ===
             | Opcode::StrictEq
             | Opcode::StrictNotEq
             | Opcode::Eq
@@ -72,26 +84,45 @@ fn is_supported_opcode(opcode: Opcode) -> bool {
             | Opcode::GreaterThanOrEq
             | Opcode::LessThan
             | Opcode::LessThanOrEq
-            // Control flow
+            | Opcode::InstanceOf
+            // === Type checks ===
+            | Opcode::TypeOf
+            | Opcode::IsObject
+            | Opcode::ValueNotNullOrUndefined
+            // === Logical ===
+            | Opcode::LogicalAnd
+            | Opcode::LogicalOr
+            | Opcode::LogicalNot
+            | Opcode::Coalesce
+            // === Control flow / jumps ===
             | Opcode::Jump
             | Opcode::JumpIfTrue
             | Opcode::JumpIfFalse
             | Opcode::JumpIfNotLessThan
             | Opcode::JumpIfNotLessThanOrEqual
+            | Opcode::JumpIfNotGreaterThan
+            | Opcode::JumpIfNotGreaterThanOrEqual
+            | Opcode::JumpIfNotEqual
+            | Opcode::JumpIfNullOrUndefined
+            | Opcode::JumpIfNotUndefined
+            | Opcode::Case
             | Opcode::IncrementLoopIteration
-            // Variable/property access
+            // === Variable / binding access ===
             | Opcode::GetName
+            | Opcode::GetNameGlobal
+            // === Property access ===
             | Opcode::GetPropertyByName
             | Opcode::GetLengthProperty
             | Opcode::GetPropertyByValue
             | Opcode::GetPropertyByValuePush
             | Opcode::SetPropertyByValue
-            // Logical
-            | Opcode::LogicalAnd
-            // Function calls
-            | Opcode::GetNameGlobal
+            // === Function ===
+            | Opcode::GetFunction
             | Opcode::Call
-            // Return
+            | Opcode::New
+            // === Error ===
+            | Opcode::Throw
+            // === Return ===
             | Opcode::CheckReturn
             | Opcode::Return
     )

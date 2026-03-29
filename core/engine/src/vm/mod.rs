@@ -980,12 +980,10 @@ impl Context {
 
                 match compiler.compile(&code) {
                     Some(jit_fn) => {
-
                         code.jit.set(JitState::Compiled(jit_fn));
                         Some(jit_fn.call(self))
                     }
                     None => {
-
                         code.jit.set(JitState::Unsupported);
                         None
                     }
