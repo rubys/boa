@@ -940,20 +940,23 @@ pub(super) extern "C" fn jit_check_return_and_return(ctx: &mut Context) -> u64 {
 
 
 
+
 // ============================================================
-// Additional simple helpers for bulk opcode support.
+// Bulk helpers — written against actual Boa interpreter APIs.
 // ============================================================
 
+// --- This ---
 pub(super) extern "C" fn jit_this(ctx: &mut Context, dst: u32) {
     let this = ctx.vm.stack.get_this(ctx.vm.frame()).clone();
     ctx.vm.set_register(dst as usize, this);
 }
 
+// --- Unary operations ---
 pub(super) extern "C" fn jit_neg(ctx: &mut Context, value: u32) -> u64 {
     let val = ctx.vm.get_register(value as usize).clone();
     match val.neg(ctx) {
-        Ok(result) => { ctx.vm.set_register(value as usize, result); 0 }
-        Err(err) => { ctx.vm.pending_exception = Some(err); 1 }
+        Ok(r) => { ctx.vm.set_register(value as usize, r); 0 }
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
     }
 }
 
@@ -961,7 +964,7 @@ pub(super) extern "C" fn jit_pos(ctx: &mut Context, value: u32) -> u64 {
     let val = ctx.vm.get_register(value as usize).clone();
     match val.to_number(ctx) {
         Ok(n) => { ctx.vm.set_register(value as usize, n.into()); 0 }
-        Err(err) => { ctx.vm.pending_exception = Some(err); 1 }
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
     }
 }
 
@@ -969,34 +972,51 @@ pub(super) extern "C" fn jit_bit_not(ctx: &mut Context, value: u32) -> u64 {
     let val = ctx.vm.get_register(value as usize).clone();
     match val.to_i32(ctx) {
         Ok(n) => { ctx.vm.set_register(value as usize, JsValue::from(!n)); 0 }
-        Err(err) => { ctx.vm.pending_exception = Some(err); 1 }
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
     }
 }
 
 pub(super) extern "C" fn jit_logical_not(ctx: &mut Context, value: u32) {
     let val = ctx.vm.get_register(value as usize);
-    let result = !val.to_boolean();
-    ctx.vm.set_register(value as usize, JsValue::from(result));
+    ctx.vm.set_register(value as usize, JsValue::from(!val.to_boolean()));
 }
 
 pub(super) extern "C" fn jit_type_of(ctx: &mut Context, value: u32) {
     let val = ctx.vm.get_register(value as usize);
-    let result = val.type_of();
-    ctx.vm.set_register(value as usize, JsValue::from(crate::JsString::from(result)));
+    let s = crate::JsString::from(val.type_of());
+    ctx.vm.set_register(value as usize, JsValue::from(s));
 }
 
 pub(super) extern "C" fn jit_is_object(ctx: &mut Context, value: u32) {
     let val = ctx.vm.get_register(value as usize);
-    let result = val.is_object();
-    ctx.vm.set_register(value as usize, JsValue::from(result));
+    ctx.vm.set_register(value as usize, JsValue::from(val.is_object()));
 }
 
+// --- Comparison helpers ---
 pub(super) extern "C" fn jit_instance_of(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32) -> u64 {
     let l = ctx.vm.get_register(lhs as usize).clone();
     let r = ctx.vm.get_register(rhs as usize).clone();
     match l.instance_of(&r, ctx) {
-        Ok(result) => { ctx.vm.set_register(dst as usize, result.into()); 0 }
-        Err(err) => { ctx.vm.pending_exception = Some(err); 1 }
+        Ok(v) => { ctx.vm.set_register(dst as usize, v.into()); 0 }
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_in(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32) -> u64 {
+    let rhs_val = ctx.vm.get_register(rhs as usize).clone();
+    let lhs_val = ctx.vm.get_register(lhs as usize).clone();
+    let result = (|| {
+        let Some(rhs_obj) = rhs_val.as_object() else {
+            return Err(crate::JsNativeError::typ()
+                .with_message(format!("right-hand side of 'in' should be an object, got `{}`", rhs_val.type_of()))
+                .into());
+        };
+        let key = lhs_val.to_property_key(ctx)?;
+        rhs_obj.has_property(key, ctx)
+    })();
+    match result {
+        Ok(v) => { ctx.vm.set_register(dst as usize, v.into()); 0 }
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
     }
 }
 
@@ -1007,22 +1027,432 @@ pub(super) extern "C" fn jit_value_not_null_or_undefined(ctx: &mut Context, src:
             crate::JsNativeError::typ().with_message("Cannot destructure undefined or null").into()
         );
         1
-    } else {
-        0
+    } else { 0 }
+}
+
+// --- Variable / binding access ---
+pub(super) extern "C" fn jit_set_name(ctx: &mut Context, src: u32, binding_index: u32) -> u64 {
+    let value = ctx.vm.get_register(src as usize).clone();
+    let mut locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
+    match ctx.find_runtime_binding(&mut locator).and_then(|()| ctx.set_binding(&locator, value, ctx.vm.frame().code_block.strict())) {
+        Ok(()) => 0,
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
     }
 }
 
-pub(super) extern "C" fn jit_throw(ctx: &mut Context, src: u32) -> u64 {
-    let val = ctx.vm.get_register(src as usize).clone();
-    ctx.vm.pending_exception = Some(crate::JsError::from_opaque(val));
-    1
+pub(super) extern "C" fn jit_get_name_or_undefined(ctx: &mut Context, dst: u32, binding_index: u32) -> u64 {
+    let mut locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
+    match ctx.find_runtime_binding(&mut locator) {
+        Ok(()) => match ctx.get_binding(&locator) {
+            Ok(v) => { ctx.vm.set_register(dst as usize, v.unwrap_or_default()); 0 }
+            Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        },
+        Err(_) => { ctx.vm.set_register(dst as usize, JsValue::undefined()); 0 }
+    }
 }
 
+pub(super) extern "C" fn jit_get_name_and_locator(ctx: &mut Context, dst: u32, binding_index: u32) -> u64 {
+    let mut locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
+    match ctx.find_runtime_binding(&mut locator) {
+        Ok(()) => match ctx.get_binding(&locator) {
+            Ok(Some(v)) => {
+                ctx.vm.set_register(dst as usize, v);
+                ctx.vm.frame_mut().binding_stack.push(locator);
+                0
+            }
+            Ok(None) => {
+                let name = locator.name().to_std_string_escaped();
+                ctx.vm.pending_exception = Some(crate::JsNativeError::reference().with_message(format!("{name} is not defined")).into());
+                1
+            }
+            Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        },
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_get_locator(ctx: &mut Context, binding_index: u32) -> u64 {
+    let mut locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
+    match ctx.find_runtime_binding(&mut locator) {
+        Ok(()) => { ctx.vm.frame_mut().binding_stack.push(locator); 0 }
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_set_name_by_locator(ctx: &mut Context, src: u32) -> u64 {
+    let value = ctx.vm.get_register(src as usize).clone();
+    let locator = ctx.vm.frame_mut().binding_stack.pop().expect("locator must exist");
+    let strict = ctx.vm.frame().code_block.strict();
+    match ctx.set_binding(&locator, value, strict) {
+        Ok(()) => 0,
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+/* DISABLED — API mismatch
+pub(super) extern "C" fn jit_put_lexical_value(ctx: &mut Context, src: u32, binding_index: u32) {
+    let value = ctx.vm.get_register(src as usize).clone();
+    let locator = &ctx.vm.frame().code_block.bindings[binding_index as usize];
+    let frame = ctx.vm.frame_mut();
+    let global = frame.realm.environment();
+    let scope = boa_ast::scope::BindingLocatorScope::Stack(locator.scope());
+    frame.environments.put_lexical_value(scope, locator.binding_index(), value, global);
+}
+
+*/
+
+pub(super) extern "C" fn jit_def_init_var(ctx: &mut Context, src: u32, binding_index: u32) -> u64 {
+    let value = ctx.vm.get_register(src as usize).clone();
+    let mut locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
+    let strict = ctx.vm.frame().code_block.strict();
+    match ctx.find_runtime_binding(&mut locator).and_then(|()| ctx.set_binding(&locator, value, strict)) {
+        Ok(()) => 0,
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+/* DISABLED — API mismatch
+pub(super) extern "C" fn jit_def_var(ctx: &mut Context, binding_index: u32) {
+    let locator = &ctx.vm.frame().code_block.bindings[binding_index as usize];
+    let frame = ctx.vm.frame_mut();
+    let global = frame.realm.environment();
+    let scope = boa_ast::scope::BindingLocatorScope::Stack(locator.scope());
+    frame.environments.put_value_if_uninitialized(scope, locator.binding_index(), JsValue::undefined(), global);
+}
+
+*/
+
+pub(super) extern "C" fn jit_delete_name(ctx: &mut Context, dst: u32, binding_index: u32) -> u64 {
+    let mut locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
+    match ctx.find_runtime_binding(&mut locator).and_then(|()| ctx.delete_binding(&locator)) {
+        Ok(v) => { ctx.vm.set_register(dst as usize, JsValue::from(v)); 0 }
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+// --- Property access ---
+pub(super) extern "C" fn jit_set_property_by_name(ctx: &mut Context, value: u32, object: u32, ic_index: u32) -> u64 {
+    let val = ctx.vm.get_register(value as usize).clone();
+    let obj_val = ctx.vm.get_register(object as usize).clone();
+    let strict = ctx.vm.frame().code_block.strict();
+    let result = (|| {
+        let ic = &ctx.vm.frame().code_block().ic[ic_index as usize];
+        let key = crate::property::PropertyKey::from(ic.name.clone());
+        let obj = obj_val.to_object(ctx)?;
+        obj.__set__(key, val, obj_val, &mut ctx.into())?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_get_property_by_name_with_this(ctx: &mut Context, dst: u32, receiver: u32, value: u32, ic_index: u32) -> u64 {
+    let recv = ctx.vm.get_register(receiver as usize).clone();
+    let obj_val = ctx.vm.get_register(value as usize).clone();
+    let result = (|| {
+        let ic = &ctx.vm.frame().code_block().ic[ic_index as usize];
+        let key = crate::property::PropertyKey::from(ic.name.clone());
+        let obj = obj_val.to_object(ctx)?;
+        obj.__get__(&key, recv, &mut ctx.into())
+    })();
+    match result {
+        Ok(v) => { ctx.vm.set_register(dst as usize, v); 0 }
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_define_own_property_by_name(ctx: &mut Context, object: u32, value: u32, name_index: u32) -> u64 {
+    let obj_val = ctx.vm.get_register(object as usize).clone();
+    let val = ctx.vm.get_register(value as usize).clone();
+    let result = (|| {
+        let name = ctx.vm.frame().code_block().constant_string(name_index as usize);
+        let key = crate::property::PropertyKey::from(name);
+        let obj = obj_val.to_object(ctx)?;
+        obj.__define_own_property__(
+            &key,
+            crate::property::PropertyDescriptor::builder().value(val).writable(true).enumerable(true).configurable(true).build(),
+            &mut ctx.into(),
+        )
+    })();
+    match result {
+        Ok(_) => 0,
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_define_own_property_by_value(ctx: &mut Context, value: u32, key: u32, object: u32) -> u64 {
+    let val = ctx.vm.get_register(value as usize).clone();
+    let k = ctx.vm.get_register(key as usize).clone();
+    let obj_val = ctx.vm.get_register(object as usize).clone();
+    let result = (|| {
+        let obj = obj_val.to_object(ctx)?;
+        let key = k.to_property_key(ctx)?;
+        obj.__define_own_property__(
+            &key,
+            crate::property::PropertyDescriptor::builder().value(val).writable(true).enumerable(true).configurable(true).build(),
+            &mut ctx.into(),
+        )
+    })();
+    match result {
+        Ok(_) => 0,
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_delete_property_by_name(ctx: &mut Context, object: u32, name_index: u32) -> u64 {
+    let obj_val = ctx.vm.take_register(object as usize);
+    let result = (|| {
+        let name = ctx.vm.frame().code_block().constant_string(name_index as usize);
+        let key = crate::property::PropertyKey::from(name);
+        let obj = obj_val.to_object(ctx)?;
+        let r = obj.__delete__(&key, &mut ctx.into())?;
+        if !r && ctx.vm.frame().code_block.strict() {
+            return Err(crate::JsNativeError::typ().with_message("Cannot delete property").into());
+        }
+        Ok(JsValue::from(r))
+    })();
+    match result {
+        Ok(v) => { ctx.vm.set_register(object as usize, v); 0 }
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_delete_property_by_value(ctx: &mut Context, object: u32, key: u32) -> u64 {
+    let obj_val = ctx.vm.get_register(object as usize).clone();
+    let k = ctx.vm.get_register(key as usize).clone();
+    let result = (|| {
+        let obj = obj_val.to_object(ctx)?;
+        let key = k.to_property_key(ctx)?;
+        let r = obj.__delete__(&key, &mut ctx.into())?;
+        if !r && ctx.vm.frame().code_block.strict() {
+            return Err(crate::JsNativeError::typ().with_message("Cannot delete property").into());
+        }
+        Ok(JsValue::from(r))
+    })();
+    match result {
+        Ok(v) => { ctx.vm.set_register(object as usize, v); 0 }
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_to_property_key(ctx: &mut Context, src: u32, dst: u32) -> u64 {
+    let val = ctx.vm.get_register(src as usize).clone();
+    match val.to_property_key(ctx) {
+        Ok(k) => { ctx.vm.set_register(dst as usize, k.into()); 0 }
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+// --- Object operations ---
+pub(super) extern "C" fn jit_get_prototype(ctx: &mut Context, object: u32) -> u64 {
+    let obj_val = ctx.vm.get_register(object as usize).clone();
+    let result = (|| {
+        let obj = obj_val.as_object().ok_or_else(|| crate::JsNativeError::typ().with_message("not an object"))?;
+        obj.__get_prototype_of__(ctx)
+    })();
+    match result {
+        Ok(p) => { ctx.vm.set_register(object as usize, p.map_or(JsValue::null(), |p| p.into())); 0 }
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_set_prototype(ctx: &mut Context, object: u32, prototype: u32) -> u64 {
+    let obj_val = ctx.vm.get_register(object as usize).clone();
+    let proto_val = ctx.vm.get_register(prototype as usize).clone();
+    let result = (|| {
+        let obj = obj_val.as_object().ok_or_else(|| crate::JsNativeError::typ().with_message("not an object"))?;
+        let proto = if proto_val.is_null() { None } else { Some(proto_val.to_object(ctx)?) };
+        obj.__set_prototype_of__(proto, ctx)
+    })();
+    match result {
+        Ok(_) => 0,
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_store_literal(ctx: &mut Context, dst: u32, index: u32) {
+    let constant = &ctx.vm.frame().code_block.constants[index as usize];
+    let val = match constant {
+        crate::vm::Constant::String(s) => JsValue::from(s.clone()),
+        crate::vm::Constant::BigInt(b) => JsValue::from(b.clone()),
+        _ => JsValue::undefined(),
+    };
+    ctx.vm.set_register(dst as usize, val);
+}
+
+pub(super) extern "C" fn jit_store_empty_object(ctx: &mut Context, dst: u32) {
+    let obj = ctx.intrinsics().templates().ordinary_object().create(
+        crate::builtins::OrdinaryObject,
+        Vec::new(),
+    );
+    ctx.vm.set_register(dst as usize, obj.into());
+}
+
+pub(super) extern "C" fn jit_store_new_array(ctx: &mut Context, dst: u32) {
+    let array = ctx.intrinsics().templates().array().create(
+        crate::builtins::array::Array,
+        Vec::new(),
+    );
+    ctx.vm.set_register(dst as usize, array.into());
+}
+
+pub(super) extern "C" fn jit_store_regexp(ctx: &mut Context, dst: u32, pattern_index: u32, flags_index: u32) -> u64 {
+    let pattern = ctx.vm.frame().code_block().constant_string(pattern_index as usize);
+    let flags = ctx.vm.frame().code_block().constant_string(flags_index as usize);
+    match crate::builtins::regexp::RegExp::create(
+        &JsValue::from(pattern),
+        &JsValue::from(flags),
+        ctx,
+    ) {
+        Ok(r) => { ctx.vm.set_register(dst as usize, r.into()); 0 }
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_push_value_to_array(ctx: &mut Context, value: u32, array: u32) -> u64 {
+    let val = ctx.vm.get_register(value as usize).clone();
+    let arr_val = ctx.vm.get_register(array as usize).clone();
+    let result = (|| {
+        let arr = arr_val.as_object().ok_or_else(|| crate::JsNativeError::typ().with_message("not an array"))?;
+        let len = arr.length_of_array_like(ctx)?;
+        arr.create_data_property_or_throw(len, val, ctx)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_push_elision_to_array(ctx: &mut Context, array: u32) -> u64 {
+    let arr_val = ctx.vm.get_register(array as usize).clone();
+    let result = (|| {
+        let arr = arr_val.as_object().ok_or_else(|| crate::JsNativeError::typ().with_message("not an array"))?;
+        let len = arr.length_of_array_like(ctx)?;
+        arr.set(crate::js_string!("length"), JsValue::from(len + 1), true, ctx)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+// --- Scope ---
+pub(super) extern "C" fn jit_push_scope(ctx: &mut Context, scope_index: u32) {
+    let scope = ctx.vm.frame().code_block().constant_scope(scope_index as usize);
+    let frame = ctx.vm.frame_mut();
+    let global = frame.realm.environment();
+    frame.environments.push_lexical(scope.num_bindings() as u32, global);
+}
+
+/* DISABLED — API mismatch
+pub(super) extern "C" fn jit_bind_this_value(ctx: &mut Context, value: u32) -> u64 {
+    let val = ctx.vm.get_register(value as usize).clone();
+    let result = (|| {
+        let global = ctx.vm.frame().realm.environment();
+        let env = ctx.vm.frame().environments.get_this_environment(global);
+        env.bind_this_value(val.clone())?;
+        let val_obj = val.as_object().map(|o| o.clone());
+        if let Some(obj) = val_obj {
+            obj.initialize_instance_elements(ctx)?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => 0,
+        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    }
+}
+
+*/
+
+pub(super) extern "C" fn jit_create_unmapped_arguments_object(ctx: &mut Context, dst: u32) {
+    let args = ctx.vm.stack.get_arguments(ctx.vm.frame()).to_vec();
+    let obj = crate::builtins::function::arguments::UnmappedArguments::new(&args, ctx);
+    ctx.vm.set_register(dst as usize, obj.into());
+}
+
+/* DISABLED — API mismatch
+pub(super) extern "C" fn jit_create_mapped_arguments_object(ctx: &mut Context, dst: u32) {
+    let func = ctx.vm.stack.get_function(ctx.vm.frame()).clone();
+    let code = ctx.vm.frame().code_block.clone();
+    let args = ctx.vm.stack.get_arguments(ctx.vm.frame()).to_vec();
+    let env = ctx.vm.frame().environments.current_declarative_ref();
+    let obj = crate::builtins::function::arguments::MappedArguments::new(
+        &func.as_object().expect("should be function"),
+        &code,
+        &args,
+        env,
+        ctx,
+    );
+    ctx.vm.set_register(dst as usize, obj.into());
+}
+
+*/
+
+pub(super) extern "C" fn jit_rest_parameter_init(ctx: &mut Context, dst: u32) {
+    let argument_count = ctx.vm.frame().argument_count as usize;
+    let param_count = ctx.vm.frame().code_block().parameter_length as usize;
+    let rest = if argument_count >= param_count {
+        let start = param_count;
+        let args = ctx.vm.stack.get_arguments(ctx.vm.frame());
+        if start < args.len() {
+            Some(args[start..].to_vec())
+        } else {
+            Some(Vec::new())
+        }
+    } else {
+        None
+    };
+    let args = rest;
+    let array = match args {
+        Some(rest) => crate::builtins::Array::create_array_from_list(rest, ctx),
+        None => ctx.intrinsics().templates().array().create(crate::builtins::array::Array, Vec::new()),
+    };
+    ctx.vm.set_register(dst as usize, array.into());
+}
+
+// --- Function ---
 pub(super) extern "C" fn jit_get_function(ctx: &mut Context, dst: u32, index: u32) {
     let code = ctx.vm.frame().code_block().constant_function(index as usize);
     let func = crate::vm::create_function_object_fast(code, ctx);
     ctx.vm.set_register(dst as usize, func.into());
 }
+
+/* DISABLED — API mismatch
+pub(super) extern "C" fn jit_get_function_object(ctx: &mut Context, function_object: u32) -> u64 {
+    let env = ctx.vm.frame().environments.get_this_environment();
+    let global = ctx.vm.frame().realm.environment();
+    match env.slots(global) {
+        Some(slots) => {
+            ctx.vm.set_register(function_object as usize, slots.function_object().clone().into());
+            0
+        }
+        None => {
+            ctx.vm.pending_exception = Some(crate::JsNativeError::typ().with_message("no function object").into());
+            1
+        }
+    }
+}
+
+*/
+
+/* DISABLED — API mismatch
+pub(super) extern "C" fn jit_new_target(ctx: &mut Context, dst: u32) {
+    let env = ctx.vm.frame().environments.get_this_environment();
+    let global = ctx.vm.frame().realm.environment();
+    let val = match env.slots(global) {
+        Some(slots) => slots.new_target().cloned().map_or(JsValue::undefined(), JsValue::from),
+        None => JsValue::undefined(),
+    };
+    ctx.vm.set_register(dst as usize, val);
+}
+
+// --- Constructor ---
+*/
 
 pub(super) extern "C" fn jit_new(ctx: &mut Context, argument_count: u32, reg_base_ptr: *mut u64) -> u64 {
     let result = jit_new_inner(ctx, argument_count);
@@ -1034,34 +1464,59 @@ pub(super) extern "C" fn jit_new(ctx: &mut Context, argument_count: u32, reg_bas
 
 fn jit_new_inner(ctx: &mut Context, argument_count: u32) -> u64 {
     use crate::vm::call_frame::CallFrameFlags;
-
     let func = ctx.vm.stack.calling_convention_get_function(argument_count as usize);
     let Some(object) = func.as_object() else {
-        ctx.vm.pending_exception = Some(
-            crate::JsNativeError::typ().with_message("not a constructor").into()
-        );
+        ctx.vm.pending_exception = Some(crate::JsNativeError::typ().with_message("not a constructor").into());
         return 1;
     };
-
     match object.__construct__(argument_count as usize).resolve(ctx) {
         Ok(true) => return 0,
         Ok(false) => {}
-        Err(err) => { ctx.vm.pending_exception = Some(err); return 1; }
+        Err(e) => { ctx.vm.pending_exception = Some(e); return 1; }
     }
-
     ctx.vm.frame_mut().flags |= CallFrameFlags::EXIT_EARLY;
     match ctx.run() {
         crate::vm::CompletionRecord::Return(result) => {
-            let frame = ctx.vm.frames.last().expect("frame must exist");
+            let frame = ctx.vm.frames.last().expect("frame");
             ctx.vm.stack.truncate_to_frame(frame);
             ctx.vm.pop_frame();
             ctx.vm.stack.push(result);
             0
         }
-        crate::vm::CompletionRecord::Throw(err) => {
-            ctx.vm.pending_exception = Some(err);
-            1
-        }
+        crate::vm::CompletionRecord::Throw(e) => { ctx.vm.pending_exception = Some(e); 1 }
         crate::vm::CompletionRecord::Normal(_) => 0,
     }
+}
+
+// --- Error ---
+pub(super) extern "C" fn jit_throw(ctx: &mut Context, src: u32) -> u64 {
+    let val = ctx.vm.get_register(src as usize).clone();
+    ctx.vm.pending_exception = Some(crate::JsError::from_opaque(val));
+    1
+}
+
+pub(super) extern "C" fn jit_throw_new_type_error(ctx: &mut Context, message: u32) -> u64 {
+    let msg = ctx.vm.frame().code_block().constant_string(message as usize);
+    ctx.vm.pending_exception = Some(crate::JsNativeError::typ().with_message(msg.to_std_string_escaped()).into());
+    1
+}
+
+pub(super) extern "C" fn jit_throw_new_reference_error(ctx: &mut Context, message: u32) -> u64 {
+    let msg = ctx.vm.frame().code_block().constant_string(message as usize);
+    ctx.vm.pending_exception = Some(crate::JsNativeError::reference().with_message(msg.to_std_string_escaped()).into());
+    1
+}
+
+pub(super) extern "C" fn jit_throw_mutate_immutable(ctx: &mut Context, index: u32) -> u64 {
+    let name = ctx.vm.frame().code_block().constant_string(index as usize);
+    ctx.vm.pending_exception = Some(
+        crate::JsNativeError::typ().with_message(format!("Cannot assign to read only variable '{}'", name.to_std_string_escaped())).into()
+    );
+    1
+}
+
+// --- Misc ---
+pub(super) extern "C" fn jit_set_register_from_accumulator(ctx: &mut Context, dst: u32) {
+    let val = ctx.vm.get_return_value();
+    ctx.vm.set_register(dst as usize, val);
 }
