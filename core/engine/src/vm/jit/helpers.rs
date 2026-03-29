@@ -1089,17 +1089,15 @@ pub(super) extern "C" fn jit_set_name_by_locator(ctx: &mut Context, src: u32) ->
     }
 }
 
-/* DISABLED — API mismatch
 pub(super) extern "C" fn jit_put_lexical_value(ctx: &mut Context, src: u32, binding_index: u32) {
     let value = ctx.vm.get_register(src as usize).clone();
-    let locator = &ctx.vm.frame().code_block.bindings[binding_index as usize];
+    let locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
+    let scope = locator.scope();
+    let bi = locator.binding_index();
     let frame = ctx.vm.frame_mut();
     let global = frame.realm.environment();
-    let scope = boa_ast::scope::BindingLocatorScope::Stack(locator.scope());
-    frame.environments.put_lexical_value(scope, locator.binding_index(), value, global);
+    frame.environments.put_lexical_value(scope, bi, value, global);
 }
-
-*/
 
 pub(super) extern "C" fn jit_def_init_var(ctx: &mut Context, src: u32, binding_index: u32) -> u64 {
     let value = ctx.vm.get_register(src as usize).clone();
