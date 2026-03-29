@@ -3,8 +3,8 @@
 use super::JitCompiler;
 
 #[test]
-fn ic_layout_offsets() {
-    super::helpers::report_ic_offsets();
+fn ic_layout_and_fast_path() {
+    super::helpers::verify_ic_offsets_and_fast_path();
 }
 
 #[test]
