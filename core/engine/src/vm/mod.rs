@@ -967,6 +967,9 @@ impl Context {
             return None;
         }
 
+        #[cfg(feature = "jit-stats")]
+        jit::helpers::stats::register();
+
         use code_block::JitState;
 
         let code = self.vm.frame().code_block.clone();
@@ -1004,10 +1007,14 @@ impl Context {
                 match compiler.compile(&code) {
                     Some(jit_fn) => {
                         code.jit.set(JitState::Compiled(jit_fn));
+                        #[cfg(feature = "jit-stats")]
+                        jit::helpers::stats::record_compilation();
                         Some(jit_fn.call(self))
                     }
                     None => {
                         code.jit.set(JitState::Unsupported);
+                        #[cfg(feature = "jit-stats")]
+                        jit::helpers::stats::record_unsupported();
                         None
                     }
                 }
