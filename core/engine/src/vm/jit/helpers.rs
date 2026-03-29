@@ -61,19 +61,22 @@ pub(crate) mod stats {
     }
 }
 
-/// Precomputed byte offsets from a JsObject's raw GC pointer to the fields
+/// Precomputed byte offsets from a `JsObject`'s raw GC pointer to the fields
 /// needed for inline caching. These are computed from struct layouts using
 /// `offset_of!` and runtime probing rather than hardcoded, so they remain
 /// correct across architectures (x86-64, aarch64, etc.) and Rust versions.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct IcOffsets {
-    /// Offset from gc_ptr to `PropertyMap.shape`.
+    /// Offset from `gc_ptr` to `PropertyMap.shape`.
+    #[allow(dead_code)]
     pub shape: i32,
-    /// Offset from gc_ptr to the `Gc` pointer inside `Shape`.
+    /// Offset from `gc_ptr` to the `Gc` pointer inside `Shape`.
     pub shape_ptr: i32,
-    /// Offset from gc_ptr to `PropertyMap.storage` (Vec start).
+    #[allow(dead_code)]
+    /// Offset from `gc_ptr` to `PropertyMap.storage` (Vec start).
+    #[allow(dead_code)]
     pub storage: i32,
-    /// Offset from gc_ptr to the Vec data pointer inside `storage`.
+    /// Offset from `gc_ptr` to the Vec data pointer inside `storage`.
     pub storage_ptr: i32,
 }
 
@@ -83,7 +86,7 @@ impl IcOffsets {
     /// Uses `offset_of!` for struct fields and runtime probing for enum
     /// discriminant sizes and `Vec` internal layout. This makes the JIT
     /// portable across architectures and resilient to layout changes.
-    pub fn compute() -> Result<Self, String> {
+    pub(super) fn compute() -> Result<Self, String> {
         use crate::object::{
             ErasedObject, Object, PropertyMap,
             jsobject::{ErasedObjectData, ErasedVTableObject, VTableObject},
@@ -121,8 +124,8 @@ impl IcOffsets {
 
     fn probe_shape_gc_offset() -> Result<i32, String> {
         use crate::object::shape::Shape;
-        let shape_size = std::mem::size_of::<Shape>();
-        let ptr_size = std::mem::size_of::<usize>();
+        let shape_size = size_of::<Shape>();
+        let ptr_size = size_of::<usize>();
         if shape_size != ptr_size * 2 {
             return Err(format!(
                 "unexpected Shape size ({shape_size}) — IC offset computation needs updating"
@@ -138,10 +141,10 @@ impl IcOffsets {
     /// data pointer.
     fn probe_vec_data_offset() -> Result<i32, String> {
         let v: Vec<u64> = vec![0xDEAD_BEEF_CAFE_BABE_u64];
-        let base = &v as *const Vec<u64> as usize;
+        let base = &raw const v as usize;
         let data = v.as_ptr() as usize;
-        let size = std::mem::size_of::<Vec<u64>>();
-        let word = std::mem::size_of::<usize>();
+        let size = size_of::<Vec<u64>>();
+        let word = size_of::<usize>();
         for i in (0..size).step_by(word) {
             // SAFETY: reading within the bounds of the Vec struct on the stack.
             let w = unsafe { *((base + i) as *const usize) };
@@ -163,14 +166,15 @@ pub(super) fn gcbox_value_offset() -> usize {
 }
 
 /// Perform an inline-cache property lookup using raw pointer arithmetic.
-/// This bypasses GcRefCell::borrow() for maximum speed.
+/// This bypasses `GcRefCell::borrow()` for maximum speed.
 ///
 /// Returns `Some(value)` if the IC hits, `None` if it misses.
 ///
 /// # Safety
-/// The `nan_boxed_obj` must be a NaN-boxed object pointer (tag == MASK_OBJECT).
-/// The `cached_shape_ptr` must be a valid shape GcBox pointer from
+/// The `nan_boxed_obj` must be a NaN-boxed object pointer (tag == `MASK_OBJECT`).
+/// The `cached_shape_ptr` must be a valid shape `GcBox` pointer from
 /// `to_addr_usize() - gcbox_value_offset()`.
+#[allow(dead_code)]
 pub(super) unsafe fn ic_fast_get(
     nan_boxed_obj: u64,
     cached_shape_ptr: u64,
@@ -182,7 +186,12 @@ pub(super) unsafe fn ic_fast_get(
 
     // SAFETY: caller guarantees nan_boxed_obj is a valid NaN-boxed object pointer.
     // Read the shape's inner Gc pointer.
-    let shape_gc_ptr = unsafe { *(gc_ptr.add(offsets.shape_ptr as usize) as *const u64) };
+    let shape_gc_ptr = unsafe {
+        gc_ptr
+            .add(offsets.shape_ptr as usize)
+            .cast::<u64>()
+            .read_unaligned()
+    };
 
     // Compare with the cached shape.
     if shape_gc_ptr != cached_shape_ptr {
@@ -191,8 +200,12 @@ pub(super) unsafe fn ic_fast_get(
 
     // SAFETY: shape matched, so the object layout is known and storage is valid.
     // IC hit! Read the storage Vec's data pointer.
-    let storage_data_ptr =
-        unsafe { *(gc_ptr.add(offsets.storage_ptr as usize) as *const *const u64) };
+    let storage_data_ptr = unsafe {
+        gc_ptr
+            .add(offsets.storage_ptr as usize)
+            .cast::<*const u64>()
+            .read_unaligned()
+    };
 
     // Read the property value at storage[slot_index].
     let value = unsafe { *storage_data_ptr.add(slot_index as usize) };
@@ -288,7 +301,7 @@ pub(super) fn verify_ic_offsets_and_fast_path() {
     eprintln!("IC fast path verification passed!");
 }
 
-/// Increment the refcount for a GC'd JsValue given its raw NaN-boxed u64.
+/// Increment the refcount for a GC'd `JsValue` given its raw NaN-boxed u64.
 ///
 /// Called by the JIT after copying a pointer-typed value to a new register.
 /// The caller has already checked that the tag indicates a pointer type.
@@ -296,13 +309,13 @@ pub(super) extern "C" fn jit_clone_value(raw: u64) {
     // Reconstruct the JsValue from the raw bits, clone it (bumps refcount),
     // then forget both copies to avoid decrementing.
     let val = unsafe { std::mem::transmute::<u64, JsValue>(raw) };
-    let _cloned = val.clone();
+    let cloned = val.clone();
     std::mem::forget(val);
-    std::mem::forget(_cloned);
+    std::mem::forget(cloned);
     // Net effect: refcount += 1 (clone increments, neither drop decrements).
 }
 
-/// Decrement the refcount for a GC'd JsValue given its raw NaN-boxed u64.
+/// Decrement the refcount for a GC'd `JsValue` given its raw NaN-boxed u64.
 ///
 /// Called by the JIT when overwriting a register that held a pointer-typed value.
 pub(super) extern "C" fn jit_drop_value(raw: u64) {
@@ -402,7 +415,7 @@ pub(super) extern "C" fn jit_add(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32
 
     // Fast path: try numeric add without cloning.
     if let Some(value) = JsValue::add_fast(l, r) {
-        ctx.vm.set_register(dst as usize, value.into());
+        ctx.vm.set_register(dst as usize, value);
         return 0;
     }
 
@@ -411,7 +424,7 @@ pub(super) extern "C" fn jit_add(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32
     let r = r.clone();
     match l.add(&r, ctx) {
         Ok(value) => {
-            ctx.vm.set_register(dst as usize, value.into());
+            ctx.vm.set_register(dst as usize, value);
             0
         }
         Err(err) => {
@@ -429,7 +442,7 @@ pub(super) extern "C" fn jit_sub(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32
     let r = ctx.vm.get_register(rhs as usize);
 
     if let Some(value) = JsValue::sub_fast(l, r) {
-        ctx.vm.set_register(dst as usize, value.into());
+        ctx.vm.set_register(dst as usize, value);
         return 0;
     }
 
@@ -437,7 +450,7 @@ pub(super) extern "C" fn jit_sub(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32
     let r = r.clone();
     match l.sub(&r, ctx) {
         Ok(value) => {
-            ctx.vm.set_register(dst as usize, value.into());
+            ctx.vm.set_register(dst as usize, value);
             0
         }
         Err(err) => {
@@ -453,7 +466,7 @@ pub(super) extern "C" fn jit_mul(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32
     let r = ctx.vm.get_register(rhs as usize);
 
     if let Some(value) = JsValue::mul_fast(l, r) {
-        ctx.vm.set_register(dst as usize, value.into());
+        ctx.vm.set_register(dst as usize, value);
         return 0;
     }
 
@@ -461,7 +474,7 @@ pub(super) extern "C" fn jit_mul(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32
     let r = r.clone();
     match l.mul(&r, ctx) {
         Ok(value) => {
-            ctx.vm.set_register(dst as usize, value.into());
+            ctx.vm.set_register(dst as usize, value);
             0
         }
         Err(err) => {
@@ -477,7 +490,7 @@ pub(super) extern "C" fn jit_bit_or(ctx: &mut Context, dst: u32, lhs: u32, rhs: 
     let r = ctx.vm.get_register(rhs as usize);
 
     if let Some(value) = JsValue::bitor_fast(l, r) {
-        ctx.vm.set_register(dst as usize, value.into());
+        ctx.vm.set_register(dst as usize, value);
         return 0;
     }
 
@@ -485,7 +498,7 @@ pub(super) extern "C" fn jit_bit_or(ctx: &mut Context, dst: u32, lhs: u32, rhs: 
     let r = r.clone();
     match l.bitor(&r, ctx) {
         Ok(value) => {
-            ctx.vm.set_register(dst as usize, value.into());
+            ctx.vm.set_register(dst as usize, value);
             0
         }
         Err(err) => {
@@ -640,7 +653,7 @@ pub(super) extern "C" fn jit_increment_loop_iteration(ctx: &mut Context) -> u64 
     }
 }
 
-/// Compare `lhs < rhs` for JumpIfNotLessThan. Returns 1 if lhs >= rhs (should jump), 0 if lhs < rhs.
+/// Compare `lhs < rhs` for `JumpIfNotLessThan`. Returns 1 if lhs >= rhs (should jump), 0 if lhs < rhs.
 /// Returns 2 on error.
 ///
 /// Implements the condition check for: `JumpIfNotLessThan { lhs, rhs, address }`
@@ -649,19 +662,13 @@ pub(super) extern "C" fn jit_not_less_than(ctx: &mut Context, lhs: u32, rhs: u32
     let r = ctx.vm.get_register(rhs as usize);
 
     if let Some(result) = JsValue::lt_fast(l, r) {
-        return if result { 0 } else { 1 };
+        return u64::from(!result);
     }
 
     let l = l.clone();
     let r = r.clone();
     match l.lt(&r, ctx) {
-        Ok(result) => {
-            if result {
-                0
-            } else {
-                1
-            }
-        }
+        Ok(result) => u64::from(!result),
         Err(err) => {
             ctx.vm.pending_exception = Some(err);
             2
@@ -682,19 +689,15 @@ pub(super) extern "C" fn jit_get_property_by_value(
 
     // Fast path: integer index into a dense array — avoids to_property_key
     // and the full __get__ path with PropertyDescriptor allocation.
-    if let JsVariant::Integer32(i) = key_val.variant() {
-        if i >= 0 {
-            if let Some(obj) = object_val.as_object() {
-                if obj.is_array() {
-                    let borrowed = obj.borrow();
-                    if let Some(element) =
-                        borrowed.properties().get_dense_property(i as u32)
-                    {
-                        ctx.vm.set_register(dst as usize, element);
-                        return 0;
-                    }
-                }
-            }
+    if let JsVariant::Integer32(i) = key_val.variant()
+        && i >= 0
+        && let Some(obj) = object_val.as_object()
+        && obj.is_array()
+    {
+        let borrowed = obj.borrow();
+        if let Some(element) = borrowed.properties().get_dense_property(i as u32) {
+            ctx.vm.set_register(dst as usize, element);
+            return 0;
         }
     }
 
@@ -747,19 +750,17 @@ pub(super) extern "C" fn jit_set_property_by_value(
 
     // Fast path: integer index into a dense array — avoids to_property_key
     // and the full __set__ path with PropertyDescriptor allocation.
-    if let JsVariant::Integer32(i) = key_val.variant() {
-        if i >= 0 {
-            if let Some(obj) = object_val.as_object() {
-                if obj.is_array() {
-                    let mut borrowed = obj.borrow_mut();
-                    if borrowed
-                        .properties_mut()
-                        .set_dense_property(i as u32, &value_val)
-                    {
-                        return 0;
-                    }
-                }
-            }
+    if let JsVariant::Integer32(i) = key_val.variant()
+        && i >= 0
+        && let Some(obj) = object_val.as_object()
+        && obj.is_array()
+    {
+        let mut borrowed = obj.borrow_mut();
+        if borrowed
+            .properties_mut()
+            .set_dense_property(i as u32, &value_val)
+        {
+            return 0;
         }
     }
 
@@ -1041,8 +1042,8 @@ fn try_direct_jit_call(
 ) -> Option<u64> {
     use crate::builtins::function::OrdinaryFunction;
     use crate::environments::{FunctionSlots, ThisBindingStatus};
+    use crate::vm::CallFrame;
     use crate::vm::call_frame::CallFrameFlags;
-    use crate::vm::{CallFrame, CodeBlock};
     use boa_ast::scope::BindingLocatorScope;
 
     let function = object.downcast_ref::<OrdinaryFunction>()?;
@@ -1075,20 +1076,17 @@ fn try_direct_jit_call(
             let compiler = ctx.vm.jit_compiler.get_or_insert_with(|| {
                 crate::vm::jit::JitCompiler::new().expect("JIT compiler should initialize")
             });
-            match compiler.compile(&code) {
-                Some(jit_fn) => {
-                    code.jit.set(crate::vm::code_block::JitState::Compiled(jit_fn));
-                    #[cfg(feature = "jit-stats")]
-                    stats::record_compilation();
-                    jit_fn
-                }
-                None => {
-                    code.jit
-                        .set(crate::vm::code_block::JitState::Unsupported);
-                    #[cfg(feature = "jit-stats")]
-                    stats::record_unsupported();
-                    return None;
-                }
+            if let Some(jit_fn) = compiler.compile(&code) {
+                code.jit
+                    .set(crate::vm::code_block::JitState::Compiled(jit_fn));
+                #[cfg(feature = "jit-stats")]
+                stats::record_compilation();
+                jit_fn
+            } else {
+                code.jit.set(crate::vm::code_block::JitState::Unsupported);
+                #[cfg(feature = "jit-stats")]
+                stats::record_unsupported();
+                return None;
             }
         }
         crate::vm::code_block::JitState::Unsupported => return None,
@@ -1179,8 +1177,7 @@ fn try_direct_jit_call(
 
     // Ensure stack capacity (the outer JitFn::call already reserved, but
     // nested calls may need more).
-    let needed =
-        ctx.vm.stack.stack.len() + ctx.vm.runtime_limits.recursion_limit() * 72;
+    let needed = ctx.vm.stack.stack.len() + ctx.vm.runtime_limits.recursion_limit() * 72;
     if ctx.vm.stack.stack.capacity() < needed {
         ctx.vm
             .stack
@@ -1191,7 +1188,7 @@ fn try_direct_jit_call(
     // Compute callee's reg_base and call the JIT function directly.
     let rp = ctx.vm.frame().rp as usize;
     let reg_base = ctx.vm.stack.stack[rp..].as_mut_ptr().cast::<u64>();
-    let tag = unsafe { jit_fn.call_raw(ctx as *mut Context, reg_base) };
+    let tag = unsafe { jit_fn.call_raw(std::ptr::from_mut::<Context>(ctx), reg_base) };
 
     match tag {
         0 => {
@@ -1274,11 +1271,11 @@ pub(super) extern "C" fn jit_check_return(ctx: &mut Context) -> u64 {
     }
 }
 
-/// CheckReturn + Return sequence.
+/// `CheckReturn` + Return sequence.
 ///
-/// Returns 0 for ControlFlow::Continue, 1 for ControlFlow::Break(Return).
+/// Returns 0 for `ControlFlow::Continue`, 1 for `ControlFlow::Break(Return)`.
 ///
-/// For non-constructor calls, CheckReturn is a no-op and Return calls
+/// For non-constructor calls, `CheckReturn` is a no-op and Return calls
 /// `handle_return()`. We combine them into one helper since in the JIT
 /// they always appear together at the end of a function.
 pub(super) extern "C" fn jit_check_return_and_return(ctx: &mut Context) -> u64 {
@@ -1449,8 +1446,8 @@ pub(super) extern "C" fn jit_get_name_or_undefined(
     binding_index: u32,
 ) -> u64 {
     let mut locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
-    match ctx.find_runtime_binding(&mut locator) {
-        Ok(()) => match ctx.get_binding(&locator) {
+    if let Ok(()) = ctx.find_runtime_binding(&mut locator) {
+        match ctx.get_binding(&locator) {
             Ok(v) => {
                 ctx.vm.set_register(dst as usize, v.unwrap_or_default());
                 0
@@ -1459,11 +1456,10 @@ pub(super) extern "C" fn jit_get_name_or_undefined(
                 ctx.vm.pending_exception = Some(e);
                 1
             }
-        },
-        Err(_) => {
-            ctx.vm.set_register(dst as usize, JsValue::undefined());
-            0
         }
+    } else {
+        ctx.vm.set_register(dst as usize, JsValue::undefined());
+        0
     }
 }
 
@@ -1598,7 +1594,7 @@ pub(super) extern "C" fn jit_set_property_by_name(
 ) -> u64 {
     let val = ctx.vm.get_register(value as usize).clone();
     let obj_val = ctx.vm.get_register(object as usize).clone();
-    let strict = ctx.vm.frame().code_block.strict();
+    let _strict = ctx.vm.frame().code_block.strict();
     let result = (|| {
         let ic = &ctx.vm.frame().code_block().ic[ic_index as usize];
         let key = crate::property::PropertyKey::from(ic.name.clone());
@@ -1800,7 +1796,7 @@ pub(super) extern "C" fn jit_get_prototype(ctx: &mut Context, object: u32) -> u6
     match result {
         Ok(p) => {
             ctx.vm
-                .set_register(object as usize, p.map_or(JsValue::null(), |p| p.into()));
+                .set_register(object as usize, p.map_or(JsValue::null(), Into::into));
             0
         }
         Err(e) => {
@@ -1882,7 +1878,7 @@ pub(super) extern "C" fn jit_store_regexp(
         ctx,
     ) {
         Ok(r) => {
-            ctx.vm.set_register(dst as usize, r.into());
+            ctx.vm.set_register(dst as usize, r);
             0
         }
         Err(e) => {
@@ -1905,11 +1901,11 @@ pub(super) extern "C" fn jit_push_value_to_array(ctx: &mut Context, value: u32, 
     {
         let mut o_mut = o.borrow_mut();
         let len = o_mut.properties().storage[0].as_i32();
-        if let Some(len) = len {
-            if o_mut.properties_mut().indexed_properties.push_dense(&val) {
-                o_mut.properties_mut().storage[0] = JsValue::new(len + 1);
-                return 0;
-            }
+        if let Some(len) = len
+            && o_mut.properties_mut().indexed_properties.push_dense(&val)
+        {
+            o_mut.properties_mut().storage[0] = JsValue::new(len + 1);
+            return 0;
         }
     }
 
@@ -1955,7 +1951,7 @@ pub(super) extern "C" fn jit_push_scope(ctx: &mut Context, scope_index: u32) {
     let global = frame.realm.environment();
     frame
         .environments
-        .push_lexical(scope.num_bindings() as u32, global);
+        .push_lexical(scope.num_bindings(), global);
 }
 
 /* DISABLED — API mismatch

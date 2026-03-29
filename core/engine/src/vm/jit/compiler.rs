@@ -13,20 +13,19 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 use std::collections::HashMap;
-use std::ops::ControlFlow;
 
 use crate::{
     Context, JsValue,
     vm::{
         CodeBlock, CompletionRecord,
-        opcode::{Address, Instruction, InstructionIterator, Opcode},
+        opcode::{Instruction, InstructionIterator},
     },
 };
 
 use super::helpers;
 
 /// Raw JIT function pointer.
-/// Args: (context_ptr, register_base_ptr). Returns a tag: 0=Continue, 1=Break(Return), 2=Break(Throw).
+/// Args: (`context_ptr`, `register_base_ptr`). Returns a tag: 0=Continue, 1=Break(Return), 2=Break(Throw).
 /// The actual values (return value, exception) are communicated via Context.
 type RawJitFn = unsafe extern "C" fn(*mut Context, *mut u64) -> u64;
 
@@ -45,20 +44,20 @@ impl std::fmt::Debug for JitFn {
 }
 
 impl JitFn {
+    /// Calls the raw JIT function, returning the tag directly
+    /// (used by `jit_call` helper for direct JIT-to-JIT calls).
+    pub(super) unsafe fn call_raw(self, context: *mut Context, reg_base: *mut u64) -> u64 {
+        unsafe { (self.0)(context, reg_base) }
+    }
     /// Call the JIT-compiled function.
     ///
     /// The JIT function returns a tag:
+    ///
     /// - 0: `handle_return` returned `Continue` — frame was popped, result
     ///   pushed on the stack. This is the normal case.
     /// - 1: `handle_return` returned `Break(Return(value))` — `exit_early`
     ///   was set, value is in the `CompletionRecord`.
     /// - 2: An exception occurred — stored in `pending_exception`.
-    /// Call the raw JIT function and return the tag directly.
-    /// Used by jit_call helper for direct JIT-to-JIT calls.
-    pub(super) unsafe fn call_raw(self, context: *mut Context, reg_base: *mut u64) -> u64 {
-        (self.0)(context, reg_base)
-    }
-
     pub(crate) fn call(self, context: &mut Context) -> CompletionRecord {
         // Pre-allocate stack capacity to prevent Vec reallocation during JIT
         // execution. If the stack Vec grows while the JIT is running, the
@@ -102,7 +101,7 @@ impl JitFn {
         //    frame, well within the reserved capacity.
         // 3. Call/New helpers explicitly update reg_base_slot after callee returns.
         // The reservation ensures the Vec never reallocates during JIT execution.
-        let tag = unsafe { (self.0)(context as *mut Context, reg_base) };
+        let tag = unsafe { (self.0)(std::ptr::from_mut::<Context>(context), reg_base) };
         match tag {
             0 => {
                 // Normal return — handle_return already popped the frame and
@@ -391,7 +390,7 @@ impl JitCompiler {
     fn declare_helpers(
         module: &mut JITModule,
         ptr: Type,
-        syms: &[(&'static str, *const u8)],
+        _syms: &[(&'static str, *const u8)],
     ) -> Result<HelperFuncs, String> {
         // Signature types: V=void return, R=i64 return, digits=number of i32 params after ctx ptr
         let sigs: &[(&str, u8, bool)] = &[
@@ -604,7 +603,7 @@ impl JitCompiler {
         }
 
         let mut ctx = cranelift_codegen::Context::for_function(func);
-        if let Err(e) = self.module.define_function(func_id, &mut ctx) {
+        if let Err(_e) = self.module.define_function(func_id, &mut ctx) {
             // Cranelift verification or compilation failed — fall back to interpreter.
             self.module.clear_context(&mut ctx);
             return None;
@@ -621,8 +620,8 @@ impl JitCompiler {
     }
 
     /// Emit a call to a fallible helper (returns i64: 0=ok, nonzero=error).
-    /// On error, jumps to error_block. On success, continues in a new block
-    /// and updates reg_base_var from the stack slot (the helper may have
+    /// On error, jumps to `error_block`. On success, continues in a new block
+    /// and updates `reg_base_var` from the stack slot (the helper may have
     /// triggered a Call that resized the VM stack).
     fn emit_fallible_call(
         builder: &mut FunctionBuilder<'_>,
@@ -651,7 +650,7 @@ impl JitCompiler {
         builder.def_var(reg_base_var, new_base);
     }
 
-    /// Load a JsValue (u64) from the register file at the given index.
+    /// Load a `JsValue` (u64) from the register file at the given index.
     fn load_reg(builder: &mut FunctionBuilder<'_>, reg_base: Value, index: u32) -> Value {
         let offset = (index as i32) * 8;
         builder.ins().load(
@@ -662,7 +661,7 @@ impl JitCompiler {
         )
     }
 
-    /// Store a JsValue (u64) to the register file at the given index.
+    /// Store a `JsValue` (u64) to the register file at the given index.
     fn store_reg(builder: &mut FunctionBuilder<'_>, reg_base: Value, index: u32, value: Value) {
         let offset = (index as i32) * 8;
         builder.ins().store(
@@ -675,11 +674,14 @@ impl JitCompiler {
 
     // NaN-boxing constants.
     const MASK_KIND: u64 = 0x7FFF_0000_0000_0000;
+    #[allow(dead_code)]
     const MASK_NAN: u64 = 0x7FF0_0000_0000_0000;
     const MASK_INT32: u64 = 0x7FF9_0000_0000_0000;
+    #[allow(dead_code)]
     const MASK_BOOLEAN: u64 = 0x7FFA_0000_0000_0000;
+    #[allow(dead_code)]
     const MASK_OTHER: u64 = 0x7FFB_0000_0000_0000;
-    /// Pointer types (Object, String, Symbol, BigInt) have tags >= this value.
+    /// Pointer types (Object, String, Symbol, `BigInt`) have tags >= this value.
     const MASK_OBJECT: u64 = 0x7FFC_0000_0000_0000;
     // Specific constants.
     const VALUE_NULL: u64 = 0x7FFB_0000_0000_0000;
@@ -691,6 +693,7 @@ impl JitCompiler {
     const VALUE_NEG_INF: u64 = 0xFFF0_0000_0000_0000;
 
     /// Integer binary operations that can be inlined with overflow check.
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     fn emit_inlined_int_binop(
         &self,
         builder: &mut FunctionBuilder<'_>,
@@ -771,6 +774,7 @@ impl JitCompiler {
     }
 
     /// Integer bitwise operations (no overflow possible).
+    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
     fn emit_inlined_int_bitop(
         &self,
         builder: &mut FunctionBuilder<'_>,
@@ -846,13 +850,13 @@ impl JitCompiler {
     /// Emit an inlined integer Add with fallback to helper.
     /// Returns true if a new block was created (caller should not add more
     /// instructions to the old block).
+    #[allow(clippy::too_many_arguments)]
     fn emit_inlined_add(
-        &self,
         builder: &mut FunctionBuilder<'_>,
         ctx_ptr: Value,
         reg_base: Value,
-        reg_base_var: cranelift_frontend::Variable,
-        reg_base_slot: cranelift_codegen::ir::StackSlot,
+        _reg_base_var: cranelift_frontend::Variable,
+        _reg_base_slot: cranelift_codegen::ir::StackSlot,
         dst: u32,
         lhs: u32,
         rhs: u32,
@@ -937,6 +941,7 @@ impl JitCompiler {
     }
 
     /// Translate the bytecode body into Cranelift IR.
+    #[allow(clippy::items_after_statements)]
     fn translate_body(
         &mut self,
         builder: &mut FunctionBuilder<'_>,
@@ -944,7 +949,7 @@ impl JitCompiler {
         reg_base_var: cranelift_frontend::Variable,
         reg_base_slot: cranelift_codegen::ir::StackSlot,
         code: &CodeBlock,
-        entry_block: Block,
+        _entry_block: Block,
     ) {
         // Import all helper function references eagerly.
         macro_rules! declare_refs {
@@ -1131,7 +1136,7 @@ impl JitCompiler {
                     );
                 }
                 Instruction::StoreInt8 { dst, value } => {
-                    let tagged_val = Self::MASK_INT32 | ((value as u32) as u64 & 0xFFFF_FFFF);
+                    let tagged_val = Self::MASK_INT32 | (u64::from(value as u32) & 0xFFFF_FFFF);
                     let tagged = builder.ins().iconst(types::I64, tagged_val as i64);
                     let off = (u32::from(dst) as i32) * 8;
                     builder.ins().store(
@@ -1142,7 +1147,7 @@ impl JitCompiler {
                     );
                 }
                 Instruction::StoreInt16 { dst, value } => {
-                    let tagged_val = Self::MASK_INT32 | ((value as u32) as u64 & 0xFFFF_FFFF);
+                    let tagged_val = Self::MASK_INT32 | (u64::from(value as u32) & 0xFFFF_FFFF);
                     let tagged = builder.ins().iconst(types::I64, tagged_val as i64);
                     let off = (u32::from(dst) as i32) * 8;
                     builder.ins().store(
@@ -1153,7 +1158,7 @@ impl JitCompiler {
                     );
                 }
                 Instruction::StoreInt32 { dst, value } => {
-                    let tagged_val = Self::MASK_INT32 | ((value as u32) as u64 & 0xFFFF_FFFF);
+                    let tagged_val = Self::MASK_INT32 | (u64::from(value as u32) & 0xFFFF_FFFF);
                     let tagged = builder.ins().iconst(types::I64, tagged_val as i64);
                     let off = (u32::from(dst) as i32) * 8;
                     builder.ins().store(
@@ -1164,7 +1169,7 @@ impl JitCompiler {
                     );
                 }
                 Instruction::StoreFloat { dst, value } => {
-                    let bits = (value as f64).to_bits();
+                    let bits = f64::from(value).to_bits();
                     let tagged = builder.ins().iconst(types::I64, bits as i64);
                     let off = (u32::from(dst) as i32) * 8;
                     builder.ins().store(
@@ -1352,7 +1357,7 @@ impl JitCompiler {
                 }
                 // SetRegisterFromAccumulator is handled below (near other register ops)
                 Instruction::Add { dst, lhs, rhs } => {
-                    self.emit_inlined_add(
+                    Self::emit_inlined_add(
                         builder,
                         ctx_ptr,
                         reg_base,
@@ -1677,7 +1682,7 @@ impl JitCompiler {
                     let bool_false = builder
                         .ins()
                         .iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
-                    let one = builder.ins().iconst(types::I64, 1);
+                    let _one = builder.ins().iconst(types::I64, 1);
                     let ext = builder.ins().uextend(types::I64, is_eq);
                     let result = builder.ins().bor(bool_false, ext);
                     Self::store_reg(builder, reg_base, u32::from(dst), result);
@@ -2021,7 +2026,15 @@ impl JitCompiler {
                     // Call helper to increment the loop iteration counter and
                     // check runtime limits. The helper returns 1 if the limit
                     // is exceeded.
-                    Self::emit_fallible_call(builder, inc_loop_ref, &[ctx_ptr], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                    Self::emit_fallible_call(
+                        builder,
+                        inc_loop_ref,
+                        &[ctx_ptr],
+                        error_block,
+                        reg_base_var,
+                        reg_base_slot,
+                        self.ptr_type,
+                    );
                 }
                 Instruction::Jump { address } => {
                     let target = block_map[&address.as_u32()];
@@ -2111,14 +2124,32 @@ impl JitCompiler {
                     let reg_base = builder.use_var(reg_base_var);
                     let lhs_off = (u32::from(lhs) as i32) * 8;
                     let rhs_off = (u32::from(rhs) as i32) * 8;
-                    let lhs_val = builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), reg_base, lhs_off);
-                    let rhs_val = builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), reg_base, rhs_off);
+                    let lhs_val = builder.ins().load(
+                        types::I64,
+                        cranelift_codegen::ir::MemFlags::trusted(),
+                        reg_base,
+                        lhs_off,
+                    );
+                    let rhs_val = builder.ins().load(
+                        types::I64,
+                        cranelift_codegen::ir::MemFlags::trusted(),
+                        reg_base,
+                        rhs_off,
+                    );
                     let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
                     let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
                     let lt = builder.ins().band(lhs_val, mask);
                     let rt = builder.ins().band(rhs_val, mask);
-                    let li = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lt, int_tag);
-                    let ri = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rt, int_tag);
+                    let li = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal,
+                        lt,
+                        int_tag,
+                    );
+                    let ri = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal,
+                        rt,
+                        int_tag,
+                    );
                     let both = builder.ins().band(li, ri);
                     let fast_block = builder.create_block();
                     let slow_block = builder.create_block();
@@ -2129,7 +2160,11 @@ impl JitCompiler {
                     builder.switch_to_block(fast_block);
                     let l32 = builder.ins().ireduce(types::I32, lhs_val);
                     let r32 = builder.ins().ireduce(types::I32, rhs_val);
-                    let is_le = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, l32, r32);
+                    let is_le = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
+                        l32,
+                        r32,
+                    );
                     builder.ins().brif(is_le, cont_block, &[], target, &[]);
 
                     // Slow path: use le_ref helper with scratch register 0.
@@ -2137,11 +2172,23 @@ impl JitCompiler {
                     let scratch = i32const(builder, 0);
                     let l = i32const(builder, u32::from(lhs));
                     let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(builder, le_ref, &[ctx_ptr, scratch, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                    Self::emit_fallible_call(
+                        builder,
+                        le_ref,
+                        &[ctx_ptr, scratch, l, r],
+                        error_block,
+                        reg_base_var,
+                        reg_base_slot,
+                        self.ptr_type,
+                    );
                     let reg_base2 = builder.use_var(reg_base_var);
                     let result = Self::load_reg(builder, reg_base2, 0);
                     let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
-                    let is_true = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, result, true_val);
+                    let is_true = builder.ins().icmp(
+                        cranelift_codegen::ir::condcodes::IntCC::Equal,
+                        result,
+                        true_val,
+                    );
                     builder.ins().brif(is_true, cont_block, &[], target, &[]);
 
                     builder.switch_to_block(cont_block);
@@ -2231,10 +2278,10 @@ impl JitCompiler {
                         val,
                         null,
                     );
-                    let is_falsy = builder.ins().bor(is_undef, is_null);
+                    let falsy = builder.ins().bor(is_undef, is_null);
                     // If falsy → don't jump (continue). If not falsy → truthy → jump.
                     // Invert: brif(is_falsy, cont, target)
-                    builder.ins().brif(is_falsy, cont_block, &[], target, &[]);
+                    builder.ins().brif(falsy, cont_block, &[], target, &[]);
 
                     builder.switch_to_block(cont_block);
                 }
@@ -2313,8 +2360,8 @@ impl JitCompiler {
                         val,
                         null,
                     );
-                    let is_falsy = builder.ins().bor(is_undef, is_null);
-                    builder.ins().brif(is_falsy, target, &[], cont_block, &[]);
+                    let falsy = builder.ins().bor(is_undef, is_null);
+                    builder.ins().brif(falsy, target, &[], cont_block, &[]);
 
                     builder.switch_to_block(cont_block);
                 }
@@ -2547,9 +2594,9 @@ impl JitCompiler {
                     );
                     let f1 = builder.ins().bor(is_false, is_null);
                     let f2 = builder.ins().bor(is_undef, is_zero);
-                    let is_falsy = builder.ins().bor(f1, f2);
+                    let falsy = builder.ins().bor(f1, f2);
                     // If falsy → don't jump (continue). If truthy → jump.
-                    builder.ins().brif(is_falsy, cont, &[], target, &[]);
+                    builder.ins().brif(falsy, cont, &[], target, &[]);
                     builder.switch_to_block(cont);
                 }
                 Instruction::Coalesce { address, value } => {
@@ -2752,18 +2799,16 @@ impl JitCompiler {
                         }
                         let addr = shape.to_addr_usize();
                         let raw_gc_ptr = addr - helpers::gcbox_value_offset();
-                        Some((raw_gc_ptr as u64, e.slot.index as u32))
+                        Some((raw_gc_ptr as u64, e.slot.index))
                     });
                     drop(cached);
 
                     if let Some((cached_shape_ptr, slot_idx)) = ic_data {
                         let reg_base = builder.use_var(reg_base_var);
-                        let obj_val =
-                            Self::load_reg(builder, reg_base, u32::from(object));
+                        let obj_val = Self::load_reg(builder, reg_base, u32::from(object));
 
                         // Check that object is an object (tag == 0x7FFC).
-                        let kind_mask =
-                            builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+                        let kind_mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
                         let obj_tag_const =
                             builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
                         let val_tag = builder.ins().band(obj_val, kind_mask);
@@ -2776,9 +2821,7 @@ impl JitCompiler {
                         let obj_block = builder.create_block();
                         let slow_block = builder.create_block();
                         let merge_block = builder.create_block();
-                        builder
-                            .ins()
-                            .brif(is_obj, obj_block, &[], slow_block, &[]);
+                        builder.ins().brif(is_obj, obj_block, &[], slow_block, &[]);
 
                         // Object confirmed. Extract pointer, check shape.
                         builder.switch_to_block(obj_block);
@@ -2802,13 +2845,9 @@ impl JitCompiler {
                         );
 
                         let fast_block = builder.create_block();
-                        builder.ins().brif(
-                            shape_match,
-                            fast_block,
-                            &[],
-                            slow_block,
-                            &[],
-                        );
+                        builder
+                            .ins()
+                            .brif(shape_match, fast_block, &[], slow_block, &[]);
 
                         // IC hit! Store to storage[slot_idx].
                         builder.switch_to_block(fast_block);
@@ -2822,8 +2861,7 @@ impl JitCompiler {
 
                         // Load the new value and old value at the slot.
                         let reg_base2 = builder.use_var(reg_base_var);
-                        let new_val =
-                            Self::load_reg(builder, reg_base2, u32::from(value));
+                        let new_val = Self::load_reg(builder, reg_base2, u32::from(value));
                         let old_val = builder.ins().load(
                             types::I64,
                             cranelift_codegen::ir::MemFlags::trusted(),
@@ -2832,10 +2870,8 @@ impl JitCompiler {
                         );
 
                         // GC: clone new value if pointer type.
-                        let mask_k =
-                            builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                        let ptr_thresh =
-                            builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
+                        let mask_k = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+                        let ptr_thresh = builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
                         let new_tag = builder.ins().band(new_val, mask_k);
                         let new_is_ptr = builder.ins().icmp(
                             cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
@@ -2844,13 +2880,9 @@ impl JitCompiler {
                         );
                         let clone_blk = builder.create_block();
                         let after_clone = builder.create_block();
-                        builder.ins().brif(
-                            new_is_ptr,
-                            clone_blk,
-                            &[],
-                            after_clone,
-                            &[],
-                        );
+                        builder
+                            .ins()
+                            .brif(new_is_ptr, clone_blk, &[], after_clone, &[]);
 
                         builder.switch_to_block(clone_blk);
                         builder.ins().call(clone_val_ref, &[new_val]);
@@ -2874,13 +2906,9 @@ impl JitCompiler {
                         );
                         let drop_blk = builder.create_block();
                         let after_drop = builder.create_block();
-                        builder.ins().brif(
-                            old_is_ptr,
-                            drop_blk,
-                            &[],
-                            after_drop,
-                            &[],
-                        );
+                        builder
+                            .ins()
+                            .brif(old_is_ptr, drop_blk, &[], after_drop, &[]);
 
                         builder.switch_to_block(drop_blk);
                         builder.ins().call(drop_val_ref, &[old_val]);
@@ -3169,7 +3197,7 @@ impl JitCompiler {
                         // Compute the raw GcBox pointer from to_addr_usize.
                         let addr = shape.to_addr_usize();
                         let raw_gc_ptr = addr - helpers::gcbox_value_offset();
-                        Some((raw_gc_ptr as u64, e.slot.index as u32))
+                        Some((raw_gc_ptr as u64, e.slot.index))
                     });
                     drop(cached);
 
@@ -3460,8 +3488,8 @@ impl JitCompiler {
                         val,
                         null,
                     );
-                    let is_falsy = builder.ins().bor(is_undef, is_null);
-                    builder.ins().brif(is_falsy, target, &[], cont_block, &[]);
+                    let falsy = builder.ins().bor(is_undef, is_null);
+                    builder.ins().brif(falsy, target, &[], cont_block, &[]);
 
                     builder.switch_to_block(cont_block);
                 }

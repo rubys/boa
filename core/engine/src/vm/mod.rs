@@ -891,11 +891,13 @@ impl Context {
                 CompletionRecord::Throw(err) => {
                     self.vm.pending_exception = Some(err);
                     return CompletionRecord::Throw(
-                        self.vm.pending_exception.take()
+                        self.vm
+                            .pending_exception
+                            .take()
                             .expect("pending exception must exist"),
                     );
                 }
-                other => return other,
+                CompletionRecord::Return(v) => return CompletionRecord::Return(v),
             }
         }
 
@@ -904,19 +906,19 @@ impl Context {
         loop {
             // JIT: when at pc==0 we've just entered a new frame.
             #[cfg(feature = "jit")]
-            if self.vm.frame().pc == 0 {
-                if let Some(record) = self.try_run_jit() {
-                    match record {
-                        CompletionRecord::Normal(_) => continue,
-                        CompletionRecord::Throw(err) => {
-                            self.vm.pending_exception = Some(err);
-                            match self.handle_throw() {
-                                ControlFlow::Continue(()) => continue,
-                                ControlFlow::Break(value) => return value,
-                            }
+            if self.vm.frame().pc == 0
+                && let Some(record) = self.try_run_jit()
+            {
+                match record {
+                    CompletionRecord::Normal(_) => continue,
+                    CompletionRecord::Throw(err) => {
+                        self.vm.pending_exception = Some(err);
+                        match self.handle_throw() {
+                            ControlFlow::Continue(()) => continue,
+                            ControlFlow::Break(value) => return value,
                         }
-                        other => return other,
                     }
+                    CompletionRecord::Return(v) => return CompletionRecord::Return(v),
                 }
             }
 
@@ -962,6 +964,8 @@ impl Context {
     /// Returns `Some(record)` if the function was JIT'd and executed,
     /// or `None` to fall back to the interpreter.
     #[cfg(feature = "jit")]
+    #[allow(clippy::items_after_statements)]
+    #[allow(clippy::items_after_statements)]
     fn try_run_jit(&mut self) -> Option<CompletionRecord> {
         if !self.vm.jit_enabled {
             return None;
@@ -992,31 +996,27 @@ impl Context {
 
                 // Reached threshold — try to compile.
                 if self.vm.jit_compiler.is_none() {
-                    match jit::JitCompiler::new() {
-                        Ok(c) => { self.vm.jit_compiler = Some(c); }
-                        Err(_) => {
-                            // JIT compiler unavailable on this platform.
-                            code.jit.set(JitState::Unsupported);
-                            self.vm.jit_enabled = false;
-                            return None;
-                        }
+                    if let Ok(c) = jit::JitCompiler::new() {
+                        self.vm.jit_compiler = Some(c);
+                    } else {
+                        // JIT compiler unavailable on this platform.
+                        code.jit.set(JitState::Unsupported);
+                        self.vm.jit_enabled = false;
+                        return None;
                     }
                 }
                 let compiler = self.vm.jit_compiler.as_mut().expect("just initialized");
 
-                match compiler.compile(&code) {
-                    Some(jit_fn) => {
-                        code.jit.set(JitState::Compiled(jit_fn));
-                        #[cfg(feature = "jit-stats")]
-                        jit::helpers::stats::record_compilation();
-                        Some(jit_fn.call(self))
-                    }
-                    None => {
-                        code.jit.set(JitState::Unsupported);
-                        #[cfg(feature = "jit-stats")]
-                        jit::helpers::stats::record_unsupported();
-                        None
-                    }
+                if let Some(jit_fn) = compiler.compile(&code) {
+                    code.jit.set(JitState::Compiled(jit_fn));
+                    #[cfg(feature = "jit-stats")]
+                    jit::helpers::stats::record_compilation();
+                    Some(jit_fn.call(self))
+                } else {
+                    code.jit.set(JitState::Unsupported);
+                    #[cfg(feature = "jit-stats")]
+                    jit::helpers::stats::record_unsupported();
+                    None
                 }
             }
         }
@@ -1031,11 +1031,13 @@ impl Context {
                 CompletionRecord::Throw(err) => {
                     self.vm.pending_exception = Some(err);
                     return CompletionRecord::Throw(
-                        self.vm.pending_exception.take()
+                        self.vm
+                            .pending_exception
+                            .take()
                             .expect("pending exception must exist"),
                     );
                 }
-                other => return other,
+                CompletionRecord::Return(v) => return CompletionRecord::Return(v),
             }
         }
 
@@ -1043,19 +1045,19 @@ impl Context {
             // JIT: when at pc==0 we've just entered a new frame. Check if it
             // should be JIT-compiled or already is.
             #[cfg(feature = "jit")]
-            if self.vm.frame().pc == 0 {
-                if let Some(record) = self.try_run_jit() {
-                    match record {
-                        CompletionRecord::Normal(_) => continue,
-                        CompletionRecord::Throw(err) => {
-                            self.vm.pending_exception = Some(err);
-                            match self.handle_throw() {
-                                ControlFlow::Continue(()) => continue,
-                                ControlFlow::Break(value) => return value,
-                            }
+            if self.vm.frame().pc == 0
+                && let Some(record) = self.try_run_jit()
+            {
+                match record {
+                    CompletionRecord::Normal(_) => continue,
+                    CompletionRecord::Throw(err) => {
+                        self.vm.pending_exception = Some(err);
+                        match self.handle_throw() {
+                            ControlFlow::Continue(()) => continue,
+                            ControlFlow::Break(value) => return value,
                         }
-                        other => return other,
                     }
+                    CompletionRecord::Return(v) => return CompletionRecord::Return(v),
                 }
             }
 
