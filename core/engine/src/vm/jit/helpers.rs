@@ -936,3 +936,132 @@ pub(super) extern "C" fn jit_check_return_and_return(ctx: &mut Context) -> u64 {
         ControlFlow::Break(_) => 1,
     }
 }
+
+
+
+
+// ============================================================
+// Additional simple helpers for bulk opcode support.
+// ============================================================
+
+pub(super) extern "C" fn jit_this(ctx: &mut Context, dst: u32) {
+    let this = ctx.vm.stack.get_this(ctx.vm.frame()).clone();
+    ctx.vm.set_register(dst as usize, this);
+}
+
+pub(super) extern "C" fn jit_neg(ctx: &mut Context, value: u32) -> u64 {
+    let val = ctx.vm.get_register(value as usize).clone();
+    match val.neg(ctx) {
+        Ok(result) => { ctx.vm.set_register(value as usize, result); 0 }
+        Err(err) => { ctx.vm.pending_exception = Some(err); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_pos(ctx: &mut Context, value: u32) -> u64 {
+    let val = ctx.vm.get_register(value as usize).clone();
+    match val.to_number(ctx) {
+        Ok(n) => { ctx.vm.set_register(value as usize, n.into()); 0 }
+        Err(err) => { ctx.vm.pending_exception = Some(err); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_bit_not(ctx: &mut Context, value: u32) -> u64 {
+    let val = ctx.vm.get_register(value as usize).clone();
+    match val.to_i32(ctx) {
+        Ok(n) => { ctx.vm.set_register(value as usize, JsValue::from(!n)); 0 }
+        Err(err) => { ctx.vm.pending_exception = Some(err); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_logical_not(ctx: &mut Context, value: u32) {
+    let val = ctx.vm.get_register(value as usize);
+    let result = !val.to_boolean();
+    ctx.vm.set_register(value as usize, JsValue::from(result));
+}
+
+pub(super) extern "C" fn jit_type_of(ctx: &mut Context, value: u32) {
+    let val = ctx.vm.get_register(value as usize);
+    let result = val.type_of();
+    ctx.vm.set_register(value as usize, JsValue::from(crate::JsString::from(result)));
+}
+
+pub(super) extern "C" fn jit_is_object(ctx: &mut Context, value: u32) {
+    let val = ctx.vm.get_register(value as usize);
+    let result = val.is_object();
+    ctx.vm.set_register(value as usize, JsValue::from(result));
+}
+
+pub(super) extern "C" fn jit_instance_of(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32) -> u64 {
+    let l = ctx.vm.get_register(lhs as usize).clone();
+    let r = ctx.vm.get_register(rhs as usize).clone();
+    match l.instance_of(&r, ctx) {
+        Ok(result) => { ctx.vm.set_register(dst as usize, result.into()); 0 }
+        Err(err) => { ctx.vm.pending_exception = Some(err); 1 }
+    }
+}
+
+pub(super) extern "C" fn jit_value_not_null_or_undefined(ctx: &mut Context, src: u32) -> u64 {
+    let val = ctx.vm.get_register(src as usize);
+    if val.is_null_or_undefined() {
+        ctx.vm.pending_exception = Some(
+            crate::JsNativeError::typ().with_message("Cannot destructure undefined or null").into()
+        );
+        1
+    } else {
+        0
+    }
+}
+
+pub(super) extern "C" fn jit_throw(ctx: &mut Context, src: u32) -> u64 {
+    let val = ctx.vm.get_register(src as usize).clone();
+    ctx.vm.pending_exception = Some(crate::JsError::from_opaque(val));
+    1
+}
+
+pub(super) extern "C" fn jit_get_function(ctx: &mut Context, dst: u32, index: u32) {
+    let code = ctx.vm.frame().code_block().constant_function(index as usize);
+    let func = crate::vm::create_function_object_fast(code, ctx);
+    ctx.vm.set_register(dst as usize, func.into());
+}
+
+pub(super) extern "C" fn jit_new(ctx: &mut Context, argument_count: u32, reg_base_ptr: *mut u64) -> u64 {
+    let result = jit_new_inner(ctx, argument_count);
+    let rp = ctx.vm.frame().rp as usize;
+    let new_base = ctx.vm.stack.stack[rp..].as_mut_ptr().cast::<u64>();
+    unsafe { reg_base_ptr.cast::<*mut u64>().write(new_base) };
+    result
+}
+
+fn jit_new_inner(ctx: &mut Context, argument_count: u32) -> u64 {
+    use crate::vm::call_frame::CallFrameFlags;
+
+    let func = ctx.vm.stack.calling_convention_get_function(argument_count as usize);
+    let Some(object) = func.as_object() else {
+        ctx.vm.pending_exception = Some(
+            crate::JsNativeError::typ().with_message("not a constructor").into()
+        );
+        return 1;
+    };
+
+    match object.__construct__(argument_count as usize).resolve(ctx) {
+        Ok(true) => return 0,
+        Ok(false) => {}
+        Err(err) => { ctx.vm.pending_exception = Some(err); return 1; }
+    }
+
+    ctx.vm.frame_mut().flags |= CallFrameFlags::EXIT_EARLY;
+    match ctx.run() {
+        crate::vm::CompletionRecord::Return(result) => {
+            let frame = ctx.vm.frames.last().expect("frame must exist");
+            ctx.vm.stack.truncate_to_frame(frame);
+            ctx.vm.pop_frame();
+            ctx.vm.stack.push(result);
+            0
+        }
+        crate::vm::CompletionRecord::Throw(err) => {
+            ctx.vm.pending_exception = Some(err);
+            1
+        }
+        crate::vm::CompletionRecord::Normal(_) => 0,
+    }
+}
