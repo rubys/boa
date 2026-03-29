@@ -219,6 +219,7 @@ impl JitCompiler {
             ("jit_get_name_and_locator", helpers::jit_get_name_and_locator as *const u8),
             ("jit_get_locator", helpers::jit_get_locator as *const u8),
             ("jit_set_name_by_locator", helpers::jit_set_name_by_locator as *const u8),
+            ("jit_put_lexical_value", helpers::jit_put_lexical_value as *const u8),
             ("jit_def_init_var", helpers::jit_def_init_var as *const u8),
             ("jit_delete_name", helpers::jit_delete_name as *const u8),
             ("jit_set_property_by_name", helpers::jit_set_property_by_name as *const u8),
@@ -312,6 +313,7 @@ impl JitCompiler {
             ("jit_get_name_and_locator", 2, true),
             ("jit_get_locator", 1, true),
             ("jit_set_name_by_locator", 1, true),
+            ("jit_put_lexical_value", 2, false),
             ("jit_def_init_var", 2, true),
             ("jit_delete_name", 2, true),
             ("jit_get_property_by_name", 3, true),
@@ -816,6 +818,7 @@ impl JitCompiler {
             get_name_and_loc_ref => "jit_get_name_and_locator",
             get_locator_ref => "jit_get_locator",
             set_name_by_loc_ref => "jit_set_name_by_locator",
+            put_lex_val_ref => "jit_put_lexical_value",
             def_init_var_ref => "jit_def_init_var",
             delete_name_ref => "jit_delete_name",
             set_prop_name_ref => "jit_set_property_by_name",
@@ -1953,6 +1956,11 @@ impl JitCompiler {
                 Instruction::SetNameByLocator { src } => {
                     let s = i32const(builder, u32::from(src));
                     Self::emit_fallible_call(builder, set_name_by_loc_ref, &[ctx_ptr, s], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::PutLexicalValue { src, binding_index } => {
+                    let s = i32const(builder, u32::from(src));
+                    let b = i32const(builder, u32::from(binding_index));
+                    builder.ins().call(put_lex_val_ref, &[ctx_ptr, s, b]);
                 }
                 Instruction::DefInitVar { src, binding_index } => {
                     let s = i32const(builder, u32::from(src));

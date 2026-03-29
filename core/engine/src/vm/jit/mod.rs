@@ -115,6 +115,7 @@ fn is_supported_opcode(opcode: Opcode) -> bool {
             | Opcode::GetLocator
             | Opcode::SetName
             | Opcode::SetNameByLocator
+            | Opcode::PutLexicalValue
             | Opcode::DefInitVar
             | Opcode::DeleteName
             | Opcode::In
