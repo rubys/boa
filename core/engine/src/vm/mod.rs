@@ -963,10 +963,7 @@ impl Context {
         let state = code.jit.get();
 
         match state {
-            JitState::Compiled(jit_fn) => {
-
-                Some(jit_fn.call(self))
-            }
+            JitState::Compiled(jit_fn) => Some(jit_fn.call(self)),
             JitState::Unsupported => {
                 // Already tried and failed — fall through to interpreter.
                 None
@@ -981,12 +978,9 @@ impl Context {
                 }
 
                 // Reached threshold — try to compile.
-                let compiler = self
-                    .vm
-                    .jit_compiler
-                    .get_or_insert_with(|| {
-                        jit::JitCompiler::new().expect("JIT compiler should initialize")
-                    });
+                let compiler = self.vm.jit_compiler.get_or_insert_with(|| {
+                    jit::JitCompiler::new().expect("JIT compiler should initialize")
+                });
 
                 match compiler.compile(&code) {
                     Some(jit_fn) => {

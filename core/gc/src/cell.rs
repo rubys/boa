@@ -106,6 +106,15 @@ impl<T> GcRefCell<T> {
         }
     }
 
+    /// Returns the byte offset of the inner `cell` field within a `GcRefCell<T>`.
+    ///
+    /// This is useful for JIT compilation where raw pointer arithmetic needs
+    /// to navigate from a `GcRefCell` to the contained value.
+    #[must_use]
+    pub const fn cell_offset() -> usize {
+        std::mem::offset_of!(Self, cell)
+    }
+
     /// Consumes the `GcCell`, returning the wrapped value.
     pub fn into_inner(self) -> T {
         self.cell.into_inner()

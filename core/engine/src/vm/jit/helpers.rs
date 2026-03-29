@@ -9,12 +9,112 @@
 
 use crate::{Context, JsValue, value::JsVariant};
 
-/// Fixed offsets from GC pointer to object internals.
-/// These are verified by the `ic_layout_offsets` test.
-pub(super) const SHAPE_OFFSET: i32 = 32;     // GcPtr → PropertyMap.shape (enum start)
-pub(super) const SHAPE_PTR_OFFSET: i32 = 40; // GcPtr → Shape inner Gc pointer (discriminant + ptr)
-pub(super) const STORAGE_OFFSET: i32 = 64;  // GcPtr → PropertyMap.storage (Vec struct start)
-pub(super) const STORAGE_PTR_OFFSET: i32 = 72; // GcPtr → storage Vec data pointer (Vec layout: cap, ptr, len)
+/// Precomputed byte offsets from a JsObject's raw GC pointer to the fields
+/// needed for inline caching. These are computed from struct layouts using
+/// `offset_of!` and runtime probing rather than hardcoded, so they remain
+/// correct across architectures (x86-64, aarch64, etc.) and Rust versions.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct IcOffsets {
+    /// Offset from gc_ptr to `PropertyMap.shape`.
+    pub shape: i32,
+    /// Offset from gc_ptr to the `Gc` pointer inside `Shape`.
+    pub shape_ptr: i32,
+    /// Offset from gc_ptr to `PropertyMap.storage` (Vec start).
+    pub storage: i32,
+    /// Offset from gc_ptr to the Vec data pointer inside `storage`.
+    pub storage_ptr: i32,
+}
+
+impl IcOffsets {
+    /// Compute IC offsets from actual struct layouts.
+    ///
+    /// Uses `offset_of!` for struct fields and runtime probing for enum
+    /// discriminant sizes and `Vec` internal layout. This makes the JIT
+    /// portable across architectures and resilient to layout changes.
+    pub fn compute() -> Self {
+        use crate::object::{
+            ErasedObject, Object, PropertyMap,
+            jsobject::{ErasedObjectData, ErasedVTableObject, VTableObject},
+        };
+        use boa_gc::{GcBox, GcRefCell};
+        use std::mem::offset_of;
+
+        // Chain: GcBox.value → VTableObject.object → GcRefCell.cell → Object.properties
+        let gcbox_to_value = GcBox::<ErasedVTableObject>::value_offset() as i32;
+        let vtobj_to_object = offset_of!(VTableObject<ErasedObjectData>, object) as i32;
+        let refcell_to_cell = GcRefCell::<ErasedObject>::cell_offset() as i32;
+        let obj_to_properties = offset_of!(Object<ErasedObjectData>, properties) as i32;
+
+        let base = gcbox_to_value + vtobj_to_object + refcell_to_cell + obj_to_properties;
+
+        let shape_in_map = offset_of!(PropertyMap, shape) as i32;
+        let storage_in_map = offset_of!(PropertyMap, storage) as i32;
+
+        let shape = base + shape_in_map;
+        let storage = base + storage_in_map;
+
+        let shape_gc_delta = Self::probe_shape_gc_offset();
+        let vec_data_delta = Self::probe_vec_data_offset();
+
+        let shape_ptr = shape + shape_gc_delta;
+        let storage_ptr = storage + vec_data_delta;
+
+        IcOffsets {
+            shape,
+            shape_ptr,
+            storage,
+            storage_ptr,
+        }
+    }
+
+    /// Determine the offset of the `Gc` pointer within a `Shape`.
+    ///
+    /// `Shape { inner: Inner }` where `Inner` is a 2-variant enum, each variant
+    /// holding a single `Gc<T>` (pointer-sized). The discriminant is padded for
+    /// alignment, placing the `Gc` pointer at the second word.
+    fn probe_shape_gc_offset() -> i32 {
+        use crate::object::shape::Shape;
+        let shape_size = std::mem::size_of::<Shape>();
+        let ptr_size = std::mem::size_of::<usize>();
+        // Shape should be exactly: discriminant (padded to pointer alignment) + Gc<T>.
+        assert_eq!(
+            shape_size,
+            ptr_size * 2,
+            "unexpected Shape size ({shape_size}) — IC offset computation needs updating"
+        );
+        ptr_size as i32
+    }
+
+    /// Determine the offset of the data pointer within `Vec<JsValue>`.
+    ///
+    /// The internal layout of `Vec` is not guaranteed by Rust, so we probe it
+    /// at runtime by creating a small Vec and finding which word holds the
+    /// data pointer.
+    fn probe_vec_data_offset() -> i32 {
+        let v: Vec<u64> = vec![0xDEAD_BEEF_CAFE_BABE_u64];
+        let base = &v as *const Vec<u64> as usize;
+        let data = v.as_ptr() as usize;
+        let size = std::mem::size_of::<Vec<u64>>();
+        let word = std::mem::size_of::<usize>();
+        for i in (0..size).step_by(word) {
+            // SAFETY: reading within the bounds of the Vec struct on the stack.
+            let w = unsafe { *((base + i) as *const usize) };
+            if w == data {
+                return i as i32;
+            }
+        }
+        panic!("could not determine Vec data pointer offset — unsupported platform layout");
+    }
+}
+
+/// Offset from a `GcBox<T>` pointer to its `value` field.
+///
+/// Used when converting between `Shape::to_addr_usize()` (which points to
+/// the value inside a `GcBox`) and the raw `GcBox` pointer (which `Gc<T>`
+/// stores internally).
+pub(super) fn gcbox_value_offset() -> usize {
+    boa_gc::GcBox::<crate::object::jsobject::ErasedVTableObject>::value_offset()
+}
 
 /// Perform an inline-cache property lookup using raw pointer arithmetic.
 /// This bypasses GcRefCell::borrow() for maximum speed.
@@ -23,38 +123,45 @@ pub(super) const STORAGE_PTR_OFFSET: i32 = 72; // GcPtr → storage Vec data poi
 ///
 /// # Safety
 /// The `nan_boxed_obj` must be a NaN-boxed object pointer (tag == MASK_OBJECT).
-/// The `cached_shape_ptr` must be a valid shape GcBox pointer from `to_addr_usize() - 16`.
+/// The `cached_shape_ptr` must be a valid shape GcBox pointer from
+/// `to_addr_usize() - gcbox_value_offset()`.
 pub(super) unsafe fn ic_fast_get(
     nan_boxed_obj: u64,
     cached_shape_ptr: u64,
     slot_index: u32,
+    offsets: &IcOffsets,
 ) -> Option<u64> {
     // Extract 48-bit GC pointer from NaN-boxed object.
     let gc_ptr = (nan_boxed_obj & 0x0000_FFFF_FFFF_FFFF) as *const u8;
 
-    // Read the shape's inner Gc pointer at gc_ptr + 40.
-    // This is the Gc<Inner> pointer (a NonNull<GcBox<Inner>>).
-    let shape_gc_ptr = *(gc_ptr.add(SHAPE_PTR_OFFSET as usize) as *const u64);
+    // SAFETY: caller guarantees nan_boxed_obj is a valid NaN-boxed object pointer.
+    // Read the shape's inner Gc pointer.
+    let shape_gc_ptr = unsafe { *(gc_ptr.add(offsets.shape_ptr as usize) as *const u64) };
 
     // Compare with the cached shape.
     if shape_gc_ptr != cached_shape_ptr {
         return None;
     }
 
-    // IC hit! Read the storage Vec's data pointer at gc_ptr + 72.
-    // Vec layout on this platform is (capacity, ptr, len), so ptr is at +8 from Vec start.
-    let storage_data_ptr = *(gc_ptr.add(STORAGE_PTR_OFFSET as usize) as *const *const u64);
+    // SAFETY: shape matched, so the object layout is known and storage is valid.
+    // IC hit! Read the storage Vec's data pointer.
+    let storage_data_ptr =
+        unsafe { *(gc_ptr.add(offsets.storage_ptr as usize) as *const *const u64) };
 
     // Read the property value at storage[slot_index].
-    let value = *storage_data_ptr.add(slot_index as usize);
+    let value = unsafe { *storage_data_ptr.add(slot_index as usize) };
 
     Some(value)
 }
 
-/// Verify the IC layout offsets and test the fast path.
+/// Verify that the computed IC offsets match the actual memory layout, and
+/// that the `ic_fast_get` fast path returns the correct property value.
 #[cfg(test)]
 pub(super) fn verify_ic_offsets_and_fast_path() {
-    use crate::{Context, JsObject, Source};
+    use crate::{Context, Source};
+
+    let offsets = IcOffsets::compute();
+    eprintln!("Computed IC offsets: {offsets:?}");
 
     let mut ctx = Context::default();
 
@@ -72,64 +179,40 @@ pub(super) fn verify_ic_offsets_and_fast_path() {
     let obj = obj_val.as_object().unwrap();
     let borrowed = obj.borrow();
 
-    // Verify offsets are correct.
+    // Verify computed offsets match actual struct layout.
     let shape_struct_ptr = &borrowed.properties().shape as *const _ as *const u8;
     let storage_struct_ptr = &borrowed.properties().storage as *const _ as *const u8;
     let actual_shape_offset = unsafe { shape_struct_ptr.offset_from(gc_ptr) };
     let actual_storage_offset = unsafe { storage_struct_ptr.offset_from(gc_ptr) };
-    assert_eq!(actual_shape_offset, SHAPE_OFFSET as isize, "shape offset mismatch");
-    assert_eq!(actual_storage_offset, STORAGE_OFFSET as isize, "storage offset mismatch");
+    assert_eq!(
+        actual_shape_offset, offsets.shape as isize,
+        "shape offset mismatch"
+    );
+    assert_eq!(
+        actual_storage_offset, offsets.storage as isize,
+        "storage offset mismatch"
+    );
 
-    // Dump the raw bytes around the shape to understand the layout.
-    let shape_bytes = unsafe {
-        std::slice::from_raw_parts(shape_struct_ptr, 16)
-    };
-    eprintln!("Shape raw bytes: {:02x?}", shape_bytes);
-
-    let shape_addr_usize = borrowed.properties().shape.to_addr_usize();
-    eprintln!("shape.to_addr_usize(): 0x{shape_addr_usize:x}");
-
-    // Find the shape pointer within the 16 bytes
-    let word0 = unsafe { *(shape_struct_ptr as *const u64) };
-    let word1 = unsafe { *(shape_struct_ptr.add(8) as *const u64) };
-    eprintln!("shape word0: 0x{word0:x}");
-    eprintln!("shape word1: 0x{word1:x}");
-
-    // Figure out which word contains the Gc pointer
-    let gc_header_size_guess = 16_u64;
-    let expected_gc_ptr_from_word0 = word0.wrapping_add(gc_header_size_guess);
-    let expected_gc_ptr_from_word1 = word1.wrapping_add(gc_header_size_guess);
-    eprintln!("word0 + 16 = 0x{expected_gc_ptr_from_word0:x}");
-    eprintln!("word1 + 16 = 0x{expected_gc_ptr_from_word1:x}");
-
-    let raw_shape_gc_ptr = if expected_gc_ptr_from_word0 as usize == shape_addr_usize {
-        eprintln!("Shape Gc pointer is at offset +0 (word0)");
-        word0
-    } else if expected_gc_ptr_from_word1 as usize == shape_addr_usize {
-        eprintln!("Shape Gc pointer is at offset +8 (word1)");
-        word1
-    } else {
-        panic!("Cannot find shape Gc pointer in Shape bytes");
-    };
-
-    // Verify the relationship: to_addr_usize = raw_gc_ptr + GcHeader_size
-    let gc_header_size = shape_addr_usize - (raw_shape_gc_ptr as usize);
-    eprintln!("GcHeader size: {gc_header_size}");
-    assert!(gc_header_size > 0 && gc_header_size <= 32, "unexpected GcHeader size");
-
-    // Verify storage Vec layout
-    let storage_vec_ptr = unsafe { gc_ptr.add(STORAGE_OFFSET as usize) };
-    // Vec data ptr is at offset +8 within the Vec (layout: cap, ptr, len)
-    let storage_data_ptr = unsafe { *(storage_vec_ptr.add(8) as *const *const u8) };
-    eprintln!("storage Vec at gc_ptr+{STORAGE_OFFSET}: {storage_vec_ptr:p}");
-    eprintln!("raw at storage+0: 0x{:x}", unsafe { *(storage_vec_ptr as *const u64) });
-    eprintln!("raw at storage+8: 0x{:x}", unsafe { *(storage_vec_ptr.add(8) as *const u64) });
-    eprintln!("raw at storage+16: 0x{:x}", unsafe { *(storage_vec_ptr.add(16) as *const u64) });
-    eprintln!("storage len: {}", borrowed.properties().storage.len());
+    // Verify storage Vec data pointer offset.
     let actual_data_ptr = borrowed.properties().storage.as_ptr() as *const u8;
-    eprintln!("actual Vec data ptr: {actual_data_ptr:p}");
-    eprintln!("actual Vec capacity: {}", borrowed.properties().storage.capacity());
-    assert_eq!(storage_data_ptr, actual_data_ptr, "storage data ptr mismatch");
+    let storage_vec_ptr = unsafe { gc_ptr.add(offsets.storage as usize) };
+    let vec_data_delta = (offsets.storage_ptr - offsets.storage) as usize;
+    let probed_data_ptr = unsafe { *(storage_vec_ptr.add(vec_data_delta) as *const *const u8) };
+    assert_eq!(
+        probed_data_ptr, actual_data_ptr,
+        "storage data ptr mismatch"
+    );
+
+    // Verify shape Gc pointer offset.
+    let shape_addr_usize = borrowed.properties().shape.to_addr_usize();
+    let gc_header_size = gcbox_value_offset();
+    let shape_gc_delta = (offsets.shape_ptr - offsets.shape) as usize;
+    let raw_shape_gc_ptr = unsafe { *(shape_struct_ptr.add(shape_gc_delta) as *const u64) };
+    assert_eq!(
+        raw_shape_gc_ptr as usize + gc_header_size,
+        shape_addr_usize,
+        "shape Gc pointer mismatch"
+    );
 
     // Now test the IC fast path: read property "x" at slot 0.
     let proper_x = borrowed.properties().storage[0].clone();
@@ -142,7 +225,7 @@ pub(super) fn verify_ic_offsets_and_fast_path() {
     drop(borrowed);
 
     // Test ic_fast_get with the cached shape pointer.
-    let result = unsafe { ic_fast_get(raw_bits, raw_shape_gc_ptr, 0) };
+    let result = unsafe { ic_fast_get(raw_bits, raw_shape_gc_ptr, 0, &offsets) };
     assert!(result.is_some(), "IC should hit");
 
     // The returned u64 should be a NaN-boxed integer 42.
@@ -153,7 +236,7 @@ pub(super) fn verify_ic_offsets_and_fast_path() {
     assert_eq!(num.unwrap(), 42.0, "IC fast path should return 42");
 
     // Test with a wrong shape pointer — should miss.
-    let result = unsafe { ic_fast_get(raw_bits, 0xDEAD_BEEF, 0) };
+    let result = unsafe { ic_fast_get(raw_bits, 0xDEAD_BEEF, 0, &offsets) };
     assert!(result.is_none(), "IC should miss with wrong shape");
 
     eprintln!("IC fast path verification passed!");
@@ -369,12 +452,7 @@ pub(super) extern "C" fn jit_bit_or(ctx: &mut Context, dst: u32, lhs: u32, rhs: 
 /// Macro to generate binary op helpers with fast path.
 macro_rules! binop_helper {
     ($name:ident, $fast_fn:ident, $slow_fn:ident) => {
-        pub(super) extern "C" fn $name(
-            ctx: &mut Context,
-            dst: u32,
-            lhs: u32,
-            rhs: u32,
-        ) -> u64 {
+        pub(super) extern "C" fn $name(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32) -> u64 {
             let l = ctx.vm.get_register(lhs as usize);
             let r = ctx.vm.get_register(rhs as usize);
 
@@ -509,9 +587,7 @@ pub(super) extern "C" fn jit_increment_loop_iteration(ctx: &mut Context) -> u64 
     frame.loop_iteration_count += 1;
     let limit = ctx.vm.runtime_limits.loop_iteration_limit();
     if limit > 0 && ctx.vm.frame().loop_iteration_count > limit {
-        ctx.vm.pending_exception = Some(
-            crate::error::RuntimeLimitError::LoopIteration.into(),
-        );
+        ctx.vm.pending_exception = Some(crate::error::RuntimeLimitError::LoopIteration.into());
         1
     } else {
         0
@@ -534,7 +610,11 @@ pub(super) extern "C" fn jit_not_less_than(ctx: &mut Context, lhs: u32, rhs: u32
     let r = r.clone();
     match l.lt(&r, ctx) {
         Ok(result) => {
-            if result { 0 } else { 1 }
+            if result {
+                0
+            } else {
+                1
+            }
         }
         Err(err) => {
             ctx.vm.pending_exception = Some(err);
@@ -618,8 +698,7 @@ pub(super) extern "C" fn jit_set_property_by_value(
 
 /// `GetName` — look up a binding in the environment chain. Returns 0 on success, 1 on exception.
 pub(super) extern "C" fn jit_get_name(ctx: &mut Context, dst: u32, binding_index: u32) -> u64 {
-    let mut binding_locator =
-        ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
+    let mut binding_locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
 
     if let Err(err) = ctx.find_runtime_binding(&mut binding_locator) {
         ctx.vm.pending_exception = Some(err);
@@ -663,7 +742,9 @@ pub(super) extern "C" fn jit_get_property_by_name(
         let Some(object_obj) = object_val.as_object() else {
             // Non-object: fall through to slow path
             let object_obj = object_val.to_object(ctx)?;
-            let key = ctx.vm.frame().code_block().ic[ic_index as usize].name.clone();
+            let key = ctx.vm.frame().code_block().ic[ic_index as usize]
+                .name
+                .clone();
             let key = crate::property::PropertyKey::from(key);
             return object_obj.__get__(&key, object_val, &mut ctx.into());
         };
@@ -682,11 +763,11 @@ pub(super) extern "C" fn jit_get_property_by_name(
 
             drop(object_borrowed);
             if slot.attributes.has_get() && result.is_object() {
-                result = result.as_object().expect("should be getter").call(
-                    &object_val,
-                    &[],
-                    ctx,
-                )?;
+                result =
+                    result
+                        .as_object()
+                        .expect("should be getter")
+                        .call(&object_val, &[], ctx)?;
             }
             return Ok(result);
         }
@@ -722,9 +803,7 @@ pub(super) extern "C" fn jit_get_length_property(
 
     let result = (|| {
         let object_obj = object_val.to_object(ctx)?;
-        let key = crate::property::PropertyKey::from(
-            crate::JsString::from("length"),
-        );
+        let key = crate::property::PropertyKey::from(crate::JsString::from("length"));
         object_obj.__get__(&key, object_val, &mut ctx.into())
     })();
 
@@ -751,8 +830,7 @@ pub(super) extern "C" fn jit_get_name_global(
 ) -> u64 {
     // Simplified version: look up the binding via the runtime.
     // TODO: use inline cache (ic_index) for faster lookups.
-    let mut binding_locator =
-        ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
+    let mut binding_locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
 
     if let Err(err) = ctx.find_runtime_binding(&mut binding_locator) {
         ctx.vm.pending_exception = Some(err);
@@ -937,10 +1015,6 @@ pub(super) extern "C" fn jit_check_return_and_return(ctx: &mut Context) -> u64 {
     }
 }
 
-
-
-
-
 // ============================================================
 // Bulk helpers — written against actual Boa interpreter APIs.
 // ============================================================
@@ -955,30 +1029,49 @@ pub(super) extern "C" fn jit_this(ctx: &mut Context, dst: u32) {
 pub(super) extern "C" fn jit_neg(ctx: &mut Context, value: u32) -> u64 {
     let val = ctx.vm.get_register(value as usize).clone();
     match val.neg(ctx) {
-        Ok(r) => { ctx.vm.set_register(value as usize, r); 0 }
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Ok(r) => {
+            ctx.vm.set_register(value as usize, r);
+            0
+        }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
 pub(super) extern "C" fn jit_pos(ctx: &mut Context, value: u32) -> u64 {
     let val = ctx.vm.get_register(value as usize).clone();
     match val.to_number(ctx) {
-        Ok(n) => { ctx.vm.set_register(value as usize, n.into()); 0 }
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Ok(n) => {
+            ctx.vm.set_register(value as usize, n.into());
+            0
+        }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
 pub(super) extern "C" fn jit_bit_not(ctx: &mut Context, value: u32) -> u64 {
     let val = ctx.vm.get_register(value as usize).clone();
     match val.to_i32(ctx) {
-        Ok(n) => { ctx.vm.set_register(value as usize, JsValue::from(!n)); 0 }
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Ok(n) => {
+            ctx.vm.set_register(value as usize, JsValue::from(!n));
+            0
+        }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
 pub(super) extern "C" fn jit_logical_not(ctx: &mut Context, value: u32) {
     let val = ctx.vm.get_register(value as usize);
-    ctx.vm.set_register(value as usize, JsValue::from(!val.to_boolean()));
+    ctx.vm
+        .set_register(value as usize, JsValue::from(!val.to_boolean()));
 }
 
 pub(super) extern "C" fn jit_type_of(ctx: &mut Context, value: u32) {
@@ -989,7 +1082,8 @@ pub(super) extern "C" fn jit_type_of(ctx: &mut Context, value: u32) {
 
 pub(super) extern "C" fn jit_is_object(ctx: &mut Context, value: u32) {
     let val = ctx.vm.get_register(value as usize);
-    ctx.vm.set_register(value as usize, JsValue::from(val.is_object()));
+    ctx.vm
+        .set_register(value as usize, JsValue::from(val.is_object()));
 }
 
 // --- Comparison helpers ---
@@ -997,8 +1091,14 @@ pub(super) extern "C" fn jit_instance_of(ctx: &mut Context, dst: u32, lhs: u32, 
     let l = ctx.vm.get_register(lhs as usize).clone();
     let r = ctx.vm.get_register(rhs as usize).clone();
     match l.instance_of(&r, ctx) {
-        Ok(v) => { ctx.vm.set_register(dst as usize, v.into()); 0 }
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Ok(v) => {
+            ctx.vm.set_register(dst as usize, v.into());
+            0
+        }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
@@ -1008,15 +1108,24 @@ pub(super) extern "C" fn jit_in(ctx: &mut Context, dst: u32, lhs: u32, rhs: u32)
     let result = (|| {
         let Some(rhs_obj) = rhs_val.as_object() else {
             return Err(crate::JsNativeError::typ()
-                .with_message(format!("right-hand side of 'in' should be an object, got `{}`", rhs_val.type_of()))
+                .with_message(format!(
+                    "right-hand side of 'in' should be an object, got `{}`",
+                    rhs_val.type_of()
+                ))
                 .into());
         };
         let key = lhs_val.to_property_key(ctx)?;
         rhs_obj.has_property(key, ctx)
     })();
     match result {
-        Ok(v) => { ctx.vm.set_register(dst as usize, v.into()); 0 }
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Ok(v) => {
+            ctx.vm.set_register(dst as usize, v.into());
+            0
+        }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
@@ -1024,34 +1133,61 @@ pub(super) extern "C" fn jit_value_not_null_or_undefined(ctx: &mut Context, src:
     let val = ctx.vm.get_register(src as usize);
     if val.is_null_or_undefined() {
         ctx.vm.pending_exception = Some(
-            crate::JsNativeError::typ().with_message("Cannot destructure undefined or null").into()
+            crate::JsNativeError::typ()
+                .with_message("Cannot destructure undefined or null")
+                .into(),
         );
         1
-    } else { 0 }
+    } else {
+        0
+    }
 }
 
 // --- Variable / binding access ---
 pub(super) extern "C" fn jit_set_name(ctx: &mut Context, src: u32, binding_index: u32) -> u64 {
     let value = ctx.vm.get_register(src as usize).clone();
     let mut locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
-    match ctx.find_runtime_binding(&mut locator).and_then(|()| ctx.set_binding(&locator, value, ctx.vm.frame().code_block.strict())) {
+    match ctx
+        .find_runtime_binding(&mut locator)
+        .and_then(|()| ctx.set_binding(&locator, value, ctx.vm.frame().code_block.strict()))
+    {
         Ok(()) => 0,
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
-pub(super) extern "C" fn jit_get_name_or_undefined(ctx: &mut Context, dst: u32, binding_index: u32) -> u64 {
+pub(super) extern "C" fn jit_get_name_or_undefined(
+    ctx: &mut Context,
+    dst: u32,
+    binding_index: u32,
+) -> u64 {
     let mut locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
     match ctx.find_runtime_binding(&mut locator) {
         Ok(()) => match ctx.get_binding(&locator) {
-            Ok(v) => { ctx.vm.set_register(dst as usize, v.unwrap_or_default()); 0 }
-            Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+            Ok(v) => {
+                ctx.vm.set_register(dst as usize, v.unwrap_or_default());
+                0
+            }
+            Err(e) => {
+                ctx.vm.pending_exception = Some(e);
+                1
+            }
         },
-        Err(_) => { ctx.vm.set_register(dst as usize, JsValue::undefined()); 0 }
+        Err(_) => {
+            ctx.vm.set_register(dst as usize, JsValue::undefined());
+            0
+        }
     }
 }
 
-pub(super) extern "C" fn jit_get_name_and_locator(ctx: &mut Context, dst: u32, binding_index: u32) -> u64 {
+pub(super) extern "C" fn jit_get_name_and_locator(
+    ctx: &mut Context,
+    dst: u32,
+    binding_index: u32,
+) -> u64 {
     let mut locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
     match ctx.find_runtime_binding(&mut locator) {
         Ok(()) => match ctx.get_binding(&locator) {
@@ -1062,30 +1198,54 @@ pub(super) extern "C" fn jit_get_name_and_locator(ctx: &mut Context, dst: u32, b
             }
             Ok(None) => {
                 let name = locator.name().to_std_string_escaped();
-                ctx.vm.pending_exception = Some(crate::JsNativeError::reference().with_message(format!("{name} is not defined")).into());
+                ctx.vm.pending_exception = Some(
+                    crate::JsNativeError::reference()
+                        .with_message(format!("{name} is not defined"))
+                        .into(),
+                );
                 1
             }
-            Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+            Err(e) => {
+                ctx.vm.pending_exception = Some(e);
+                1
+            }
         },
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
 pub(super) extern "C" fn jit_get_locator(ctx: &mut Context, binding_index: u32) -> u64 {
     let mut locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
     match ctx.find_runtime_binding(&mut locator) {
-        Ok(()) => { ctx.vm.frame_mut().binding_stack.push(locator); 0 }
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Ok(()) => {
+            ctx.vm.frame_mut().binding_stack.push(locator);
+            0
+        }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
 pub(super) extern "C" fn jit_set_name_by_locator(ctx: &mut Context, src: u32) -> u64 {
     let value = ctx.vm.get_register(src as usize).clone();
-    let locator = ctx.vm.frame_mut().binding_stack.pop().expect("locator must exist");
+    let locator = ctx
+        .vm
+        .frame_mut()
+        .binding_stack
+        .pop()
+        .expect("locator must exist");
     let strict = ctx.vm.frame().code_block.strict();
     match ctx.set_binding(&locator, value, strict) {
         Ok(()) => 0,
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
@@ -1096,16 +1256,24 @@ pub(super) extern "C" fn jit_put_lexical_value(ctx: &mut Context, src: u32, bind
     let bi = locator.binding_index();
     let frame = ctx.vm.frame_mut();
     let global = frame.realm.environment();
-    frame.environments.put_lexical_value(scope, bi, value, global);
+    frame
+        .environments
+        .put_lexical_value(scope, bi, value, global);
 }
 
 pub(super) extern "C" fn jit_def_init_var(ctx: &mut Context, src: u32, binding_index: u32) -> u64 {
     let value = ctx.vm.get_register(src as usize).clone();
     let mut locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
     let strict = ctx.vm.frame().code_block.strict();
-    match ctx.find_runtime_binding(&mut locator).and_then(|()| ctx.set_binding(&locator, value, strict)) {
+    match ctx
+        .find_runtime_binding(&mut locator)
+        .and_then(|()| ctx.set_binding(&locator, value, strict))
+    {
         Ok(()) => 0,
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
@@ -1122,14 +1290,28 @@ pub(super) extern "C" fn jit_def_var(ctx: &mut Context, binding_index: u32) {
 
 pub(super) extern "C" fn jit_delete_name(ctx: &mut Context, dst: u32, binding_index: u32) -> u64 {
     let mut locator = ctx.vm.frame().code_block.bindings[binding_index as usize].clone();
-    match ctx.find_runtime_binding(&mut locator).and_then(|()| ctx.delete_binding(&locator)) {
-        Ok(v) => { ctx.vm.set_register(dst as usize, JsValue::from(v)); 0 }
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    match ctx
+        .find_runtime_binding(&mut locator)
+        .and_then(|()| ctx.delete_binding(&locator))
+    {
+        Ok(v) => {
+            ctx.vm.set_register(dst as usize, JsValue::from(v));
+            0
+        }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
 // --- Property access ---
-pub(super) extern "C" fn jit_set_property_by_name(ctx: &mut Context, value: u32, object: u32, ic_index: u32) -> u64 {
+pub(super) extern "C" fn jit_set_property_by_name(
+    ctx: &mut Context,
+    value: u32,
+    object: u32,
+    ic_index: u32,
+) -> u64 {
     let val = ctx.vm.get_register(value as usize).clone();
     let obj_val = ctx.vm.get_register(object as usize).clone();
     let strict = ctx.vm.frame().code_block.strict();
@@ -1142,11 +1324,20 @@ pub(super) extern "C" fn jit_set_property_by_name(ctx: &mut Context, value: u32,
     })();
     match result {
         Ok(()) => 0,
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
-pub(super) extern "C" fn jit_get_property_by_name_with_this(ctx: &mut Context, dst: u32, receiver: u32, value: u32, ic_index: u32) -> u64 {
+pub(super) extern "C" fn jit_get_property_by_name_with_this(
+    ctx: &mut Context,
+    dst: u32,
+    receiver: u32,
+    value: u32,
+    ic_index: u32,
+) -> u64 {
     let recv = ctx.vm.get_register(receiver as usize).clone();
     let obj_val = ctx.vm.get_register(value as usize).clone();
     let result = (|| {
@@ -1156,31 +1347,59 @@ pub(super) extern "C" fn jit_get_property_by_name_with_this(ctx: &mut Context, d
         obj.__get__(&key, recv, &mut ctx.into())
     })();
     match result {
-        Ok(v) => { ctx.vm.set_register(dst as usize, v); 0 }
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Ok(v) => {
+            ctx.vm.set_register(dst as usize, v);
+            0
+        }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
-pub(super) extern "C" fn jit_define_own_property_by_name(ctx: &mut Context, object: u32, value: u32, name_index: u32) -> u64 {
+pub(super) extern "C" fn jit_define_own_property_by_name(
+    ctx: &mut Context,
+    object: u32,
+    value: u32,
+    name_index: u32,
+) -> u64 {
     let obj_val = ctx.vm.get_register(object as usize).clone();
     let val = ctx.vm.get_register(value as usize).clone();
     let result = (|| {
-        let name = ctx.vm.frame().code_block().constant_string(name_index as usize);
+        let name = ctx
+            .vm
+            .frame()
+            .code_block()
+            .constant_string(name_index as usize);
         let key = crate::property::PropertyKey::from(name);
         let obj = obj_val.to_object(ctx)?;
         obj.__define_own_property__(
             &key,
-            crate::property::PropertyDescriptor::builder().value(val).writable(true).enumerable(true).configurable(true).build(),
+            crate::property::PropertyDescriptor::builder()
+                .value(val)
+                .writable(true)
+                .enumerable(true)
+                .configurable(true)
+                .build(),
             &mut ctx.into(),
         )
     })();
     match result {
         Ok(_) => 0,
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
-pub(super) extern "C" fn jit_define_own_property_by_value(ctx: &mut Context, value: u32, key: u32, object: u32) -> u64 {
+pub(super) extern "C" fn jit_define_own_property_by_value(
+    ctx: &mut Context,
+    value: u32,
+    key: u32,
+    object: u32,
+) -> u64 {
     let val = ctx.vm.get_register(value as usize).clone();
     let k = ctx.vm.get_register(key as usize).clone();
     let obj_val = ctx.vm.get_register(object as usize).clone();
@@ -1189,35 +1408,63 @@ pub(super) extern "C" fn jit_define_own_property_by_value(ctx: &mut Context, val
         let key = k.to_property_key(ctx)?;
         obj.__define_own_property__(
             &key,
-            crate::property::PropertyDescriptor::builder().value(val).writable(true).enumerable(true).configurable(true).build(),
+            crate::property::PropertyDescriptor::builder()
+                .value(val)
+                .writable(true)
+                .enumerable(true)
+                .configurable(true)
+                .build(),
             &mut ctx.into(),
         )
     })();
     match result {
         Ok(_) => 0,
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
-pub(super) extern "C" fn jit_delete_property_by_name(ctx: &mut Context, object: u32, name_index: u32) -> u64 {
+pub(super) extern "C" fn jit_delete_property_by_name(
+    ctx: &mut Context,
+    object: u32,
+    name_index: u32,
+) -> u64 {
     let obj_val = ctx.vm.take_register(object as usize);
     let result = (|| {
-        let name = ctx.vm.frame().code_block().constant_string(name_index as usize);
+        let name = ctx
+            .vm
+            .frame()
+            .code_block()
+            .constant_string(name_index as usize);
         let key = crate::property::PropertyKey::from(name);
         let obj = obj_val.to_object(ctx)?;
         let r = obj.__delete__(&key, &mut ctx.into())?;
         if !r && ctx.vm.frame().code_block.strict() {
-            return Err(crate::JsNativeError::typ().with_message("Cannot delete property").into());
+            return Err(crate::JsNativeError::typ()
+                .with_message("Cannot delete property")
+                .into());
         }
         Ok(JsValue::from(r))
     })();
     match result {
-        Ok(v) => { ctx.vm.set_register(object as usize, v); 0 }
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Ok(v) => {
+            ctx.vm.set_register(object as usize, v);
+            0
+        }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
-pub(super) extern "C" fn jit_delete_property_by_value(ctx: &mut Context, object: u32, key: u32) -> u64 {
+pub(super) extern "C" fn jit_delete_property_by_value(
+    ctx: &mut Context,
+    object: u32,
+    key: u32,
+) -> u64 {
     let obj_val = ctx.vm.get_register(object as usize).clone();
     let k = ctx.vm.get_register(key as usize).clone();
     let result = (|| {
@@ -1225,21 +1472,35 @@ pub(super) extern "C" fn jit_delete_property_by_value(ctx: &mut Context, object:
         let key = k.to_property_key(ctx)?;
         let r = obj.__delete__(&key, &mut ctx.into())?;
         if !r && ctx.vm.frame().code_block.strict() {
-            return Err(crate::JsNativeError::typ().with_message("Cannot delete property").into());
+            return Err(crate::JsNativeError::typ()
+                .with_message("Cannot delete property")
+                .into());
         }
         Ok(JsValue::from(r))
     })();
     match result {
-        Ok(v) => { ctx.vm.set_register(object as usize, v); 0 }
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Ok(v) => {
+            ctx.vm.set_register(object as usize, v);
+            0
+        }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
 pub(super) extern "C" fn jit_to_property_key(ctx: &mut Context, src: u32, dst: u32) -> u64 {
     let val = ctx.vm.get_register(src as usize).clone();
     match val.to_property_key(ctx) {
-        Ok(k) => { ctx.vm.set_register(dst as usize, k.into()); 0 }
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Ok(k) => {
+            ctx.vm.set_register(dst as usize, k.into());
+            0
+        }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
@@ -1247,12 +1508,21 @@ pub(super) extern "C" fn jit_to_property_key(ctx: &mut Context, src: u32, dst: u
 pub(super) extern "C" fn jit_get_prototype(ctx: &mut Context, object: u32) -> u64 {
     let obj_val = ctx.vm.get_register(object as usize).clone();
     let result = (|| {
-        let obj = obj_val.as_object().ok_or_else(|| crate::JsNativeError::typ().with_message("not an object"))?;
+        let obj = obj_val
+            .as_object()
+            .ok_or_else(|| crate::JsNativeError::typ().with_message("not an object"))?;
         obj.__get_prototype_of__(ctx)
     })();
     match result {
-        Ok(p) => { ctx.vm.set_register(object as usize, p.map_or(JsValue::null(), |p| p.into())); 0 }
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Ok(p) => {
+            ctx.vm
+                .set_register(object as usize, p.map_or(JsValue::null(), |p| p.into()));
+            0
+        }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
@@ -1260,13 +1530,22 @@ pub(super) extern "C" fn jit_set_prototype(ctx: &mut Context, object: u32, proto
     let obj_val = ctx.vm.get_register(object as usize).clone();
     let proto_val = ctx.vm.get_register(prototype as usize).clone();
     let result = (|| {
-        let obj = obj_val.as_object().ok_or_else(|| crate::JsNativeError::typ().with_message("not an object"))?;
-        let proto = if proto_val.is_null() { None } else { Some(proto_val.to_object(ctx)?) };
+        let obj = obj_val
+            .as_object()
+            .ok_or_else(|| crate::JsNativeError::typ().with_message("not an object"))?;
+        let proto = if proto_val.is_null() {
+            None
+        } else {
+            Some(proto_val.to_object(ctx)?)
+        };
         obj.__set_prototype_of__(proto, ctx)
     })();
     match result {
         Ok(_) => 0,
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
@@ -1281,38 +1560,62 @@ pub(super) extern "C" fn jit_store_literal(ctx: &mut Context, dst: u32, index: u
 }
 
 pub(super) extern "C" fn jit_store_empty_object(ctx: &mut Context, dst: u32) {
-    let obj = ctx.intrinsics().templates().ordinary_object().create(
-        crate::builtins::OrdinaryObject,
-        Vec::new(),
-    );
+    let obj = ctx
+        .intrinsics()
+        .templates()
+        .ordinary_object()
+        .create(crate::builtins::OrdinaryObject, Vec::new());
     ctx.vm.set_register(dst as usize, obj.into());
 }
 
 pub(super) extern "C" fn jit_store_new_array(ctx: &mut Context, dst: u32) {
     let array = ctx.intrinsics().templates().array().create(
         crate::builtins::array::Array,
-        Vec::from([JsValue::new(0)]),  // Initial storage with length = 0
+        Vec::from([JsValue::new(0)]), // Initial storage with length = 0
     );
     ctx.vm.set_register(dst as usize, array.into());
 }
 
-pub(super) extern "C" fn jit_store_regexp(ctx: &mut Context, dst: u32, pattern_index: u32, flags_index: u32) -> u64 {
-    let pattern = ctx.vm.frame().code_block().constant_string(pattern_index as usize);
-    let flags = ctx.vm.frame().code_block().constant_string(flags_index as usize);
+pub(super) extern "C" fn jit_store_regexp(
+    ctx: &mut Context,
+    dst: u32,
+    pattern_index: u32,
+    flags_index: u32,
+) -> u64 {
+    let pattern = ctx
+        .vm
+        .frame()
+        .code_block()
+        .constant_string(pattern_index as usize);
+    let flags = ctx
+        .vm
+        .frame()
+        .code_block()
+        .constant_string(flags_index as usize);
     match crate::builtins::regexp::RegExp::create(
         &JsValue::from(pattern),
         &JsValue::from(flags),
         ctx,
     ) {
-        Ok(r) => { ctx.vm.set_register(dst as usize, r.into()); 0 }
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Ok(r) => {
+            ctx.vm.set_register(dst as usize, r.into());
+            0
+        }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
 pub(super) extern "C" fn jit_push_value_to_array(ctx: &mut Context, value: u32, array: u32) -> u64 {
     let val = ctx.vm.get_register(value as usize).clone();
-    let o = ctx.vm.get_register(array as usize)
-        .as_object().expect("should be an object").clone();
+    let o = ctx
+        .vm
+        .get_register(array as usize)
+        .as_object()
+        .expect("should be an object")
+        .clone();
 
     // Fast path: push directly to dense indexed storage.
     {
@@ -1328,30 +1631,47 @@ pub(super) extern "C" fn jit_push_value_to_array(ctx: &mut Context, value: u32, 
 
     // Slow path
     let len = o.length_of_array_like(ctx).expect("should have length");
-    o.create_data_property_or_throw(len, val, ctx).expect("should create property");
+    o.create_data_property_or_throw(len, val, ctx)
+        .expect("should create property");
     0
 }
 
 pub(super) extern "C" fn jit_push_elision_to_array(ctx: &mut Context, array: u32) -> u64 {
     let arr_val = ctx.vm.get_register(array as usize).clone();
     let result = (|| {
-        let arr = arr_val.as_object().ok_or_else(|| crate::JsNativeError::typ().with_message("not an array"))?;
+        let arr = arr_val
+            .as_object()
+            .ok_or_else(|| crate::JsNativeError::typ().with_message("not an array"))?;
         let len = arr.length_of_array_like(ctx)?;
-        arr.set(crate::js_string!("length"), JsValue::from(len + 1), true, ctx)?;
+        arr.set(
+            crate::js_string!("length"),
+            JsValue::from(len + 1),
+            true,
+            ctx,
+        )?;
         Ok(())
     })();
     match result {
         Ok(()) => 0,
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
     }
 }
 
 // --- Scope ---
 pub(super) extern "C" fn jit_push_scope(ctx: &mut Context, scope_index: u32) {
-    let scope = ctx.vm.frame().code_block().constant_scope(scope_index as usize);
+    let scope = ctx
+        .vm
+        .frame()
+        .code_block()
+        .constant_scope(scope_index as usize);
     let frame = ctx.vm.frame_mut();
     let global = frame.realm.environment();
-    frame.environments.push_lexical(scope.num_bindings() as u32, global);
+    frame
+        .environments
+        .push_lexical(scope.num_bindings() as u32, global);
 }
 
 /* DISABLED — API mismatch
@@ -1416,14 +1736,22 @@ pub(super) extern "C" fn jit_rest_parameter_init(ctx: &mut Context, dst: u32) {
     let args = rest;
     let array = match args {
         Some(rest) => crate::builtins::Array::create_array_from_list(rest, ctx),
-        None => ctx.intrinsics().templates().array().create(crate::builtins::array::Array, Vec::new()),
+        None => ctx
+            .intrinsics()
+            .templates()
+            .array()
+            .create(crate::builtins::array::Array, Vec::new()),
     };
     ctx.vm.set_register(dst as usize, array.into());
 }
 
 // --- Function ---
 pub(super) extern "C" fn jit_get_function(ctx: &mut Context, dst: u32, index: u32) {
-    let code = ctx.vm.frame().code_block().constant_function(index as usize);
+    let code = ctx
+        .vm
+        .frame()
+        .code_block()
+        .constant_function(index as usize);
     let func = crate::vm::create_function_object_fast(code, ctx);
     ctx.vm.set_register(dst as usize, func.into());
 }
@@ -1460,7 +1788,11 @@ pub(super) extern "C" fn jit_new_target(ctx: &mut Context, dst: u32) {
 // --- Constructor ---
 */
 
-pub(super) extern "C" fn jit_new(ctx: &mut Context, argument_count: u32, reg_base_ptr: *mut u64) -> u64 {
+pub(super) extern "C" fn jit_new(
+    ctx: &mut Context,
+    argument_count: u32,
+    reg_base_ptr: *mut u64,
+) -> u64 {
     let result = jit_new_inner(ctx, argument_count);
     let rp = ctx.vm.frame().rp as usize;
     let new_base = ctx.vm.stack.stack[rp..].as_mut_ptr().cast::<u64>();
@@ -1470,9 +1802,16 @@ pub(super) extern "C" fn jit_new(ctx: &mut Context, argument_count: u32, reg_bas
 
 fn jit_new_inner(ctx: &mut Context, argument_count: u32) -> u64 {
     use crate::vm::call_frame::CallFrameFlags;
-    let func = ctx.vm.stack.calling_convention_get_function(argument_count as usize);
+    let func = ctx
+        .vm
+        .stack
+        .calling_convention_get_function(argument_count as usize);
     let Some(object) = func.as_object() else {
-        ctx.vm.pending_exception = Some(crate::JsNativeError::typ().with_message("not a constructor").into());
+        ctx.vm.pending_exception = Some(
+            crate::JsNativeError::typ()
+                .with_message("not a constructor")
+                .into(),
+        );
         return 1;
     };
     let cons = object.clone();
@@ -1481,7 +1820,10 @@ fn jit_new_inner(ctx: &mut Context, argument_count: u32) -> u64 {
     match cons.__construct__(argument_count as usize).resolve(ctx) {
         Ok(true) => return 0,
         Ok(false) => {}
-        Err(e) => { ctx.vm.pending_exception = Some(e); return 1; }
+        Err(e) => {
+            ctx.vm.pending_exception = Some(e);
+            return 1;
+        }
     }
     ctx.vm.frame_mut().flags |= CallFrameFlags::EXIT_EARLY;
     match ctx.run() {
@@ -1492,7 +1834,10 @@ fn jit_new_inner(ctx: &mut Context, argument_count: u32) -> u64 {
             ctx.vm.stack.push(result);
             0
         }
-        crate::vm::CompletionRecord::Throw(e) => { ctx.vm.pending_exception = Some(e); 1 }
+        crate::vm::CompletionRecord::Throw(e) => {
+            ctx.vm.pending_exception = Some(e);
+            1
+        }
         crate::vm::CompletionRecord::Normal(_) => 0,
     }
 }
@@ -1505,21 +1850,42 @@ pub(super) extern "C" fn jit_throw(ctx: &mut Context, src: u32) -> u64 {
 }
 
 pub(super) extern "C" fn jit_throw_new_type_error(ctx: &mut Context, message: u32) -> u64 {
-    let msg = ctx.vm.frame().code_block().constant_string(message as usize);
-    ctx.vm.pending_exception = Some(crate::JsNativeError::typ().with_message(msg.to_std_string_escaped()).into());
+    let msg = ctx
+        .vm
+        .frame()
+        .code_block()
+        .constant_string(message as usize);
+    ctx.vm.pending_exception = Some(
+        crate::JsNativeError::typ()
+            .with_message(msg.to_std_string_escaped())
+            .into(),
+    );
     1
 }
 
 pub(super) extern "C" fn jit_throw_new_reference_error(ctx: &mut Context, message: u32) -> u64 {
-    let msg = ctx.vm.frame().code_block().constant_string(message as usize);
-    ctx.vm.pending_exception = Some(crate::JsNativeError::reference().with_message(msg.to_std_string_escaped()).into());
+    let msg = ctx
+        .vm
+        .frame()
+        .code_block()
+        .constant_string(message as usize);
+    ctx.vm.pending_exception = Some(
+        crate::JsNativeError::reference()
+            .with_message(msg.to_std_string_escaped())
+            .into(),
+    );
     1
 }
 
 pub(super) extern "C" fn jit_throw_mutate_immutable(ctx: &mut Context, index: u32) -> u64 {
     let name = ctx.vm.frame().code_block().constant_string(index as usize);
     ctx.vm.pending_exception = Some(
-        crate::JsNativeError::typ().with_message(format!("Cannot assign to read only variable '{}'", name.to_std_string_escaped())).into()
+        crate::JsNativeError::typ()
+            .with_message(format!(
+                "Cannot assign to read only variable '{}'",
+                name.to_std_string_escaped()
+            ))
+            .into(),
     );
     1
 }

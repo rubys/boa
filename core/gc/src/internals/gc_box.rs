@@ -21,6 +21,15 @@ impl<T: Trace> GcBox<T> {
             value,
         }
     }
+
+    /// Returns the byte offset of the `value` field within a `GcBox<T>`.
+    ///
+    /// This is useful for JIT compilation where raw pointer arithmetic needs
+    /// to navigate from a `GcBox` pointer to the contained value.
+    #[must_use]
+    pub const fn value_offset() -> usize {
+        std::mem::offset_of!(Self, value)
+    }
 }
 
 impl<T: Trace + ?Sized> GcBox<T> {
