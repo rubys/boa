@@ -2737,18 +2737,189 @@ impl JitCompiler {
                     object,
                     ic_index,
                 } => {
-                    let v = i32const(builder, u32::from(value));
-                    let o = i32const(builder, u32::from(object));
-                    let ic = i32const(builder, u32::from(ic_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        set_prop_name_ref,
-                        &[ctx_ptr, v, o, ic],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+                    // Try to inline the IC check at compile time (same pattern as GetPropertyByName).
+                    let ic_idx = u32::from(ic_index) as usize;
+                    let ic_entry = &code.ic[ic_idx];
+                    let cached = ic_entry.entries.borrow();
+                    let ic_data = cached.first().and_then(|e| {
+                        use crate::object::shape::slot::SlotAttributes;
+                        let shape = e.shape.upgrade()?;
+                        if e.slot.attributes.contains(SlotAttributes::NOT_CACHEABLE)
+                            || e.slot.attributes.contains(SlotAttributes::PROTOTYPE)
+                            || e.slot.attributes.is_accessor_descriptor()
+                        {
+                            return None;
+                        }
+                        let addr = shape.to_addr_usize();
+                        let raw_gc_ptr = addr - helpers::gcbox_value_offset();
+                        Some((raw_gc_ptr as u64, e.slot.index as u32))
+                    });
+                    drop(cached);
+
+                    if let Some((cached_shape_ptr, slot_idx)) = ic_data {
+                        let reg_base = builder.use_var(reg_base_var);
+                        let obj_val =
+                            Self::load_reg(builder, reg_base, u32::from(object));
+
+                        // Check that object is an object (tag == 0x7FFC).
+                        let kind_mask =
+                            builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+                        let obj_tag_const =
+                            builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
+                        let val_tag = builder.ins().band(obj_val, kind_mask);
+                        let is_obj = builder.ins().icmp(
+                            cranelift_codegen::ir::condcodes::IntCC::Equal,
+                            val_tag,
+                            obj_tag_const,
+                        );
+
+                        let obj_block = builder.create_block();
+                        let slow_block = builder.create_block();
+                        let merge_block = builder.create_block();
+                        builder
+                            .ins()
+                            .brif(is_obj, obj_block, &[], slow_block, &[]);
+
+                        // Object confirmed. Extract pointer, check shape.
+                        builder.switch_to_block(obj_block);
+                        let ptr_mask = builder
+                            .ins()
+                            .iconst(types::I64, 0x0000_FFFF_FFFF_FFFF_u64 as i64);
+                        let obj_ptr = builder.ins().band(obj_val, ptr_mask);
+
+                        let shape_val = builder.ins().load(
+                            types::I64,
+                            cranelift_codegen::ir::MemFlags::trusted(),
+                            obj_ptr,
+                            self.ic_offsets.shape_ptr,
+                        );
+                        let cached_const =
+                            builder.ins().iconst(types::I64, cached_shape_ptr as i64);
+                        let shape_match = builder.ins().icmp(
+                            cranelift_codegen::ir::condcodes::IntCC::Equal,
+                            shape_val,
+                            cached_const,
+                        );
+
+                        let fast_block = builder.create_block();
+                        builder.ins().brif(
+                            shape_match,
+                            fast_block,
+                            &[],
+                            slow_block,
+                            &[],
+                        );
+
+                        // IC hit! Store to storage[slot_idx].
+                        builder.switch_to_block(fast_block);
+                        let storage_data = builder.ins().load(
+                            types::I64,
+                            cranelift_codegen::ir::MemFlags::trusted(),
+                            obj_ptr,
+                            self.ic_offsets.storage_ptr,
+                        );
+                        let slot_off = (slot_idx as i32) * 8;
+
+                        // Load the new value and old value at the slot.
+                        let reg_base2 = builder.use_var(reg_base_var);
+                        let new_val =
+                            Self::load_reg(builder, reg_base2, u32::from(value));
+                        let old_val = builder.ins().load(
+                            types::I64,
+                            cranelift_codegen::ir::MemFlags::trusted(),
+                            storage_data,
+                            slot_off,
+                        );
+
+                        // GC: clone new value if pointer type.
+                        let mask_k =
+                            builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+                        let ptr_thresh =
+                            builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
+                        let new_tag = builder.ins().band(new_val, mask_k);
+                        let new_is_ptr = builder.ins().icmp(
+                            cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                            new_tag,
+                            ptr_thresh,
+                        );
+                        let clone_blk = builder.create_block();
+                        let after_clone = builder.create_block();
+                        builder.ins().brif(
+                            new_is_ptr,
+                            clone_blk,
+                            &[],
+                            after_clone,
+                            &[],
+                        );
+
+                        builder.switch_to_block(clone_blk);
+                        builder.ins().call(clone_val_ref, &[new_val]);
+                        builder.ins().jump(after_clone, &[]);
+
+                        // Write the new value to storage.
+                        builder.switch_to_block(after_clone);
+                        builder.ins().store(
+                            cranelift_codegen::ir::MemFlags::trusted(),
+                            new_val,
+                            storage_data,
+                            slot_off,
+                        );
+
+                        // GC: drop old value if pointer type.
+                        let old_tag = builder.ins().band(old_val, mask_k);
+                        let old_is_ptr = builder.ins().icmp(
+                            cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                            old_tag,
+                            ptr_thresh,
+                        );
+                        let drop_blk = builder.create_block();
+                        let after_drop = builder.create_block();
+                        builder.ins().brif(
+                            old_is_ptr,
+                            drop_blk,
+                            &[],
+                            after_drop,
+                            &[],
+                        );
+
+                        builder.switch_to_block(drop_blk);
+                        builder.ins().call(drop_val_ref, &[old_val]);
+                        builder.ins().jump(after_drop, &[]);
+
+                        builder.switch_to_block(after_drop);
+                        builder.ins().jump(merge_block, &[]);
+
+                        // Slow path.
+                        builder.switch_to_block(slow_block);
+                        let v = i32const(builder, u32::from(value));
+                        let o = i32const(builder, u32::from(object));
+                        let ic = i32const(builder, u32::from(ic_index));
+                        Self::emit_fallible_call(
+                            builder,
+                            set_prop_name_ref,
+                            &[ctx_ptr, v, o, ic],
+                            error_block,
+                            reg_base_var,
+                            reg_base_slot,
+                            self.ptr_type,
+                        );
+                        builder.ins().jump(merge_block, &[]);
+
+                        builder.switch_to_block(merge_block);
+                    } else {
+                        let v = i32const(builder, u32::from(value));
+                        let o = i32const(builder, u32::from(object));
+                        let ic = i32const(builder, u32::from(ic_index));
+                        Self::emit_fallible_call(
+                            builder,
+                            set_prop_name_ref,
+                            &[ctx_ptr, v, o, ic],
+                            error_block,
+                            reg_base_var,
+                            reg_base_slot,
+                            self.ptr_type,
+                        );
+                    }
                 }
                 Instruction::GetPropertyByNameWithThis {
                     dst,
