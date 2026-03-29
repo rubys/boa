@@ -80,7 +80,7 @@ impl<T: NativeObject> Clone for JsObject<T> {
 pub(crate) struct VTableObject<T: NativeObject + ?Sized> {
     #[unsafe_ignore_trace]
     vtable: &'static InternalObjectMethods,
-    object: GcRefCell<Object<T>>,
+    pub(crate) object: GcRefCell<Object<T>>,
 }
 
 impl JsObject {
