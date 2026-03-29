@@ -678,8 +678,27 @@ pub(super) extern "C" fn jit_get_property_by_value(
     object: u32,
 ) -> u64 {
     let key_val = ctx.vm.get_register(key as usize).clone();
-    let receiver_val = ctx.vm.get_register(receiver as usize).clone();
     let object_val = ctx.vm.get_register(object as usize).clone();
+
+    // Fast path: integer index into a dense array — avoids to_property_key
+    // and the full __get__ path with PropertyDescriptor allocation.
+    if let JsVariant::Integer32(i) = key_val.variant() {
+        if i >= 0 {
+            if let Some(obj) = object_val.as_object() {
+                if obj.is_array() {
+                    let borrowed = obj.borrow();
+                    if let Some(element) =
+                        borrowed.properties().get_dense_property(i as u32)
+                    {
+                        ctx.vm.set_register(dst as usize, element);
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+
+    let receiver_val = ctx.vm.get_register(receiver as usize).clone();
 
     let result = (|| {
         let object = object_val.to_object(ctx)?;
@@ -724,8 +743,27 @@ pub(super) extern "C" fn jit_set_property_by_value(
 ) -> u64 {
     let value_val = ctx.vm.get_register(value as usize).clone();
     let key_val = ctx.vm.get_register(key as usize).clone();
-    let receiver_val = ctx.vm.get_register(receiver as usize).clone();
     let object_val = ctx.vm.get_register(object as usize).clone();
+
+    // Fast path: integer index into a dense array — avoids to_property_key
+    // and the full __set__ path with PropertyDescriptor allocation.
+    if let JsVariant::Integer32(i) = key_val.variant() {
+        if i >= 0 {
+            if let Some(obj) = object_val.as_object() {
+                if obj.is_array() {
+                    let mut borrowed = obj.borrow_mut();
+                    if borrowed
+                        .properties_mut()
+                        .set_dense_property(i as u32, &value_val)
+                    {
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+
+    let receiver_val = ctx.vm.get_register(receiver as usize).clone();
 
     let result = (|| {
         let object = object_val.to_object(ctx)?;
