@@ -31,7 +31,7 @@ impl IcOffsets {
     /// Uses `offset_of!` for struct fields and runtime probing for enum
     /// discriminant sizes and `Vec` internal layout. This makes the JIT
     /// portable across architectures and resilient to layout changes.
-    pub fn compute() -> Self {
+    pub fn compute() -> Result<Self, String> {
         use crate::object::{
             ErasedObject, Object, PropertyMap,
             jsobject::{ErasedObjectData, ErasedVTableObject, VTableObject},
@@ -53,36 +53,30 @@ impl IcOffsets {
         let shape = base + shape_in_map;
         let storage = base + storage_in_map;
 
-        let shape_gc_delta = Self::probe_shape_gc_offset();
-        let vec_data_delta = Self::probe_vec_data_offset();
+        let shape_gc_delta = Self::probe_shape_gc_offset()?;
+        let vec_data_delta = Self::probe_vec_data_offset()?;
 
         let shape_ptr = shape + shape_gc_delta;
         let storage_ptr = storage + vec_data_delta;
 
-        IcOffsets {
+        Ok(IcOffsets {
             shape,
             shape_ptr,
             storage,
             storage_ptr,
-        }
+        })
     }
 
-    /// Determine the offset of the `Gc` pointer within a `Shape`.
-    ///
-    /// `Shape { inner: Inner }` where `Inner` is a 2-variant enum, each variant
-    /// holding a single `Gc<T>` (pointer-sized). The discriminant is padded for
-    /// alignment, placing the `Gc` pointer at the second word.
-    fn probe_shape_gc_offset() -> i32 {
+    fn probe_shape_gc_offset() -> Result<i32, String> {
         use crate::object::shape::Shape;
         let shape_size = std::mem::size_of::<Shape>();
         let ptr_size = std::mem::size_of::<usize>();
-        // Shape should be exactly: discriminant (padded to pointer alignment) + Gc<T>.
-        assert_eq!(
-            shape_size,
-            ptr_size * 2,
-            "unexpected Shape size ({shape_size}) — IC offset computation needs updating"
-        );
-        ptr_size as i32
+        if shape_size != ptr_size * 2 {
+            return Err(format!(
+                "unexpected Shape size ({shape_size}) — IC offset computation needs updating"
+            ));
+        }
+        Ok(ptr_size as i32)
     }
 
     /// Determine the offset of the data pointer within `Vec<JsValue>`.
@@ -90,7 +84,7 @@ impl IcOffsets {
     /// The internal layout of `Vec` is not guaranteed by Rust, so we probe it
     /// at runtime by creating a small Vec and finding which word holds the
     /// data pointer.
-    fn probe_vec_data_offset() -> i32 {
+    fn probe_vec_data_offset() -> Result<i32, String> {
         let v: Vec<u64> = vec![0xDEAD_BEEF_CAFE_BABE_u64];
         let base = &v as *const Vec<u64> as usize;
         let data = v.as_ptr() as usize;
@@ -100,10 +94,10 @@ impl IcOffsets {
             // SAFETY: reading within the bounds of the Vec struct on the stack.
             let w = unsafe { *((base + i) as *const usize) };
             if w == data {
-                return i as i32;
+                return Ok(i as i32);
             }
         }
-        panic!("could not determine Vec data pointer offset — unsupported platform layout");
+        Err("could not determine Vec data pointer offset — unsupported platform layout".into())
     }
 }
 
@@ -160,7 +154,7 @@ pub(super) unsafe fn ic_fast_get(
 pub(super) fn verify_ic_offsets_and_fast_path() {
     use crate::{Context, Source};
 
-    let offsets = IcOffsets::compute();
+    let offsets = IcOffsets::compute().expect("IC offsets should be computable on this platform");
     eprintln!("Computed IC offsets: {offsets:?}");
 
     let mut ctx = Context::default();

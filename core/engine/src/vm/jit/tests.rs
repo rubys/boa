@@ -318,7 +318,7 @@ fn ic_fast_get_works_on_eval_objects() {
     assert_eq!(tag, 0x7FFC_0000_0000_0000, "should be object");
 
     // Test ic_fast_get.
-    let offsets = helpers::IcOffsets::compute();
+    let offsets = helpers::IcOffsets::compute().expect("IC offsets should compute on this platform");
     let result =
         unsafe { helpers::ic_fast_get(raw_bits, cached_shape_ptr, slot_index as u32, &offsets) };
     assert!(

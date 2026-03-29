@@ -886,7 +886,17 @@ impl Context {
         // JIT: try to run the current frame's code block as native code.
         #[cfg(feature = "jit")]
         if let Some(record) = self.try_run_jit() {
-            return record;
+            match record {
+                CompletionRecord::Normal(_) => {}
+                CompletionRecord::Throw(err) => {
+                    self.vm.pending_exception = Some(err);
+                    return CompletionRecord::Throw(
+                        self.vm.pending_exception.take()
+                            .expect("pending exception must exist"),
+                    );
+                }
+                other => return other,
+            }
         }
 
         let mut runtime_budget: u32 = budget;
@@ -978,9 +988,18 @@ impl Context {
                 }
 
                 // Reached threshold — try to compile.
-                let compiler = self.vm.jit_compiler.get_or_insert_with(|| {
-                    jit::JitCompiler::new().expect("JIT compiler should initialize")
-                });
+                if self.vm.jit_compiler.is_none() {
+                    match jit::JitCompiler::new() {
+                        Ok(c) => { self.vm.jit_compiler = Some(c); }
+                        Err(_) => {
+                            // JIT compiler unavailable on this platform.
+                            code.jit.set(JitState::Unsupported);
+                            self.vm.jit_enabled = false;
+                            return None;
+                        }
+                    }
+                }
+                let compiler = self.vm.jit_compiler.as_mut().expect("just initialized");
 
                 match compiler.compile(&code) {
                     Some(jit_fn) => {
@@ -1000,7 +1019,17 @@ impl Context {
         // JIT: try to run the current frame's code block as native code.
         #[cfg(feature = "jit")]
         if let Some(record) = self.try_run_jit() {
-            return record;
+            match record {
+                CompletionRecord::Normal(_) => {}
+                CompletionRecord::Throw(err) => {
+                    self.vm.pending_exception = Some(err);
+                    return CompletionRecord::Throw(
+                        self.vm.pending_exception.take()
+                            .expect("pending exception must exist"),
+                    );
+                }
+                other => return other,
+            }
         }
 
         loop {
