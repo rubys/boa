@@ -3,6 +3,11 @@
 use super::JitCompiler;
 
 #[test]
+fn ic_layout_offsets() {
+    super::helpers::report_ic_offsets();
+}
+
+#[test]
 fn jit_compiler_creates_successfully() {
     let compiler = JitCompiler::new();
     assert!(compiler.is_ok(), "JIT compiler should initialize on x86-64");
