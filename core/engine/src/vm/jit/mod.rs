@@ -2,10 +2,12 @@
 //!
 //! This module provides a JIT compiler that translates Boa bytecode into native
 //! machine code using Cranelift. It operates at function granularity: a function
-//! is either fully JIT-compiled or interpreted. If a [`CodeBlock`] contains any
+//! is either fully JIT-compiled or interpreted.
+//!
+//! If a [`CodeBlock`] contains any opcode that the JIT does not yet support, it
+//! falls back to the interpreter.
 //!
 //! Requires a 64-bit target (NaN-boxing layout and pointer assumptions).
-//! opcode that the JIT does not yet support, it falls back to the interpreter.
 
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("JIT compilation requires a 64-bit target");

@@ -64,14 +64,25 @@ impl JitFn {
         // execution. If the stack Vec grows while the JIT is running, the
         // reg_base pointer becomes dangling. We reserve enough space for
         // nested calls (each frame needs up to ~64 registers + prologue + args).
-        let needed =
-            context.vm.stack.stack.len() + context.vm.runtime_limits.recursion_limit() * 72;
+        //
+        // Use saturating arithmetic and clamp to a hard maximum to avoid
+        // potential overflow or unbounded allocations when recursion_limit
+        // is configured very large.
+        const MAX_JIT_STACK_RESERVE: usize = 1 << 20; // ~8 MB cap
+        let current_len = context.vm.stack.stack.len();
+        let extra = context
+            .vm
+            .runtime_limits
+            .recursion_limit()
+            .saturating_mul(72);
+        let needed = current_len
+            .saturating_add(extra)
+            .min(MAX_JIT_STACK_RESERVE.max(current_len));
         if context.vm.stack.stack.capacity() < needed {
-            context
-                .vm
-                .stack
-                .stack
-                .reserve(needed - context.vm.stack.stack.len());
+            let additional = needed.saturating_sub(current_len);
+            if additional > 0 {
+                context.vm.stack.stack.reserve(additional);
+            }
         }
 
         // Compute the register base pointer: &mut stack[rp] as *mut u64.
@@ -572,6 +583,7 @@ impl JitCompiler {
 
             // Cranelift Variable for reg_base — handles SSA phi nodes
             // automatically at block joins (loop headers, merge blocks).
+            // cranelift-frontend 0.130: declare_var(Type) -> Variable
             let reg_base_var = builder.declare_var(self.ptr_type);
             builder.def_var(reg_base_var, reg_base_arg);
 
@@ -598,7 +610,8 @@ impl JitCompiler {
 
         let code_ptr = self.module.get_finalized_function(func_id);
 
-        // SAFETY: The generated code has signature (ptr) -> i64, matching RawJitFn.
+        // SAFETY: The generated code has signature (ctx_ptr: *mut Context, reg_base_ptr: *mut u64) -> u64
+        // (lowered as I64 in Cranelift), matching RawJitFn and the signature declared above.
         let raw: RawJitFn = unsafe { std::mem::transmute(code_ptr) };
         Some(JitFn(raw))
     }
@@ -2089,84 +2102,43 @@ impl JitCompiler {
                     builder.switch_to_block(fast_continue);
                 }
                 Instruction::JumpIfNotLessThanOrEqual { lhs, rhs, address } => {
-                    // Same pattern as JumpIfNotLessThan but with <= instead of <.
-                    // For now, just use the helper.
+                    // Jump if !(lhs <= rhs). Inline integer fast path + helper slow path.
                     let target = block_map[&address.as_u32()];
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    // Reuse not_less_than pattern: le_fast returns bool.
-                    // Helper: jit_le returns 0=ok(true), 1=ok(false via exception... no)
-                    // Actually we need a dedicated helper. For now, use the general
-                    // comparison + jump pattern via helpers.
-                    let le_ref = le_ref;
-                    let d_tmp = i32const(builder, 0); // dummy dst - we'll read it back
-                    // Actually, jit_le writes result to a register. We need a temp register
-                    // approach, or a different helper. Let's just call the not_less_than helper
-                    // logic but for <=. Let me inline it instead:
-                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
-                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
+                    let reg_base = builder.use_var(reg_base_var);
+                    let lhs_off = (u32::from(lhs) as i32) * 8;
+                    let rhs_off = (u32::from(rhs) as i32) * 8;
+                    let lhs_val = builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), reg_base, lhs_off);
+                    let rhs_val = builder.ins().load(types::I64, cranelift_codegen::ir::MemFlags::trusted(), reg_base, rhs_off);
                     let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
                     let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let lhs_tag = builder.ins().band(lhs_val, mask);
-                    let rhs_tag = builder.ins().band(rhs_val, mask);
-                    let lhs_is_int = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        lhs_tag,
-                        int_tag,
-                    );
-                    let rhs_is_int = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        rhs_tag,
-                        int_tag,
-                    );
-                    let both_int = builder.ins().band(lhs_is_int, rhs_is_int);
-
+                    let lt = builder.ins().band(lhs_val, mask);
+                    let rt = builder.ins().band(rhs_val, mask);
+                    let li = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lt, int_tag);
+                    let ri = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rt, int_tag);
+                    let both = builder.ins().band(li, ri);
                     let fast_block = builder.create_block();
                     let slow_block = builder.create_block();
                     let cont_block = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(both_int, fast_block, &[], slow_block, &[]);
+                    builder.ins().brif(both, fast_block, &[], slow_block, &[]);
 
+                    // Fast path: compare as i32.
                     builder.switch_to_block(fast_block);
-                    let li = builder.ins().ireduce(types::I32, lhs_val);
-                    let ri = builder.ins().ireduce(types::I32, rhs_val);
-                    let is_le = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
-                        li,
-                        ri,
-                    );
+                    let l32 = builder.ins().ireduce(types::I32, lhs_val);
+                    let r32 = builder.ins().ireduce(types::I32, rhs_val);
+                    let is_le = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, l32, r32);
                     builder.ins().brif(is_le, cont_block, &[], target, &[]);
 
+                    // Slow path: use le_ref helper with scratch register 0.
                     builder.switch_to_block(slow_block);
-                    // Slow: call jit_le helper, check result
-                    let result = builder.ins().call(le_ref, &[ctx_ptr, l, r]);
-                    let tag = builder.inst_results(result)[0];
-                    let two = builder.ins().iconst(types::I64, 2);
-                    let is_error = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        tag,
-                        two,
-                    );
-                    let not_error = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(is_error, error_block, &[], not_error, &[]);
-                    builder.switch_to_block(not_error);
-                    // jit_le returns 0=success. But it writes to dst register...
-                    // Actually this is wrong — jit_le writes a boolean to a register,
-                    // but we need to branch on it. For now, fall back to just using
-                    // the helper for the full thing.
-                    // TODO: add a dedicated jit_not_less_than_or_equal helper.
-                    let one = builder.ins().iconst(types::I64, 1);
-                    let is_err_or_false = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        tag,
-                        one,
-                    );
-                    builder
-                        .ins()
-                        .brif(is_err_or_false, target, &[], cont_block, &[]);
+                    let scratch = i32const(builder, 0);
+                    let l = i32const(builder, u32::from(lhs));
+                    let r = i32const(builder, u32::from(rhs));
+                    Self::emit_fallible_call(builder, le_ref, &[ctx_ptr, scratch, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                    let reg_base2 = builder.use_var(reg_base_var);
+                    let result = Self::load_reg(builder, reg_base2, 0);
+                    let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
+                    let is_true = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, result, true_val);
+                    builder.ins().brif(is_true, cont_block, &[], target, &[]);
 
                     builder.switch_to_block(cont_block);
                 }
