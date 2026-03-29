@@ -1291,7 +1291,7 @@ pub(super) extern "C" fn jit_store_empty_object(ctx: &mut Context, dst: u32) {
 pub(super) extern "C" fn jit_store_new_array(ctx: &mut Context, dst: u32) {
     let array = ctx.intrinsics().templates().array().create(
         crate::builtins::array::Array,
-        Vec::new(),
+        Vec::from([JsValue::new(0)]),  // Initial storage with length = 0
     );
     ctx.vm.set_register(dst as usize, array.into());
 }
@@ -1311,17 +1311,25 @@ pub(super) extern "C" fn jit_store_regexp(ctx: &mut Context, dst: u32, pattern_i
 
 pub(super) extern "C" fn jit_push_value_to_array(ctx: &mut Context, value: u32, array: u32) -> u64 {
     let val = ctx.vm.get_register(value as usize).clone();
-    let arr_val = ctx.vm.get_register(array as usize).clone();
-    let result = (|| {
-        let arr = arr_val.as_object().ok_or_else(|| crate::JsNativeError::typ().with_message("not an array"))?;
-        let len = arr.length_of_array_like(ctx)?;
-        arr.create_data_property_or_throw(len, val, ctx)?;
-        Ok(())
-    })();
-    match result {
-        Ok(()) => 0,
-        Err(e) => { ctx.vm.pending_exception = Some(e); 1 }
+    let o = ctx.vm.get_register(array as usize)
+        .as_object().expect("should be an object").clone();
+
+    // Fast path: push directly to dense indexed storage.
+    {
+        let mut o_mut = o.borrow_mut();
+        let len = o_mut.properties().storage[0].as_i32();
+        if let Some(len) = len {
+            if o_mut.properties_mut().indexed_properties.push_dense(&val) {
+                o_mut.properties_mut().storage[0] = JsValue::new(len + 1);
+                return 0;
+            }
+        }
     }
+
+    // Slow path
+    let len = o.length_of_array_like(ctx).expect("should have length");
+    o.create_data_property_or_throw(len, val, ctx).expect("should create property");
+    0
 }
 
 pub(super) extern "C" fn jit_push_elision_to_array(ctx: &mut Context, array: u32) -> u64 {
@@ -1467,7 +1475,10 @@ fn jit_new_inner(ctx: &mut Context, argument_count: u32) -> u64 {
         ctx.vm.pending_exception = Some(crate::JsNativeError::typ().with_message("not a constructor").into());
         return 1;
     };
-    match object.__construct__(argument_count as usize).resolve(ctx) {
+    let cons = object.clone();
+    // Push new.target — __construct__ expects it on the stack.
+    ctx.vm.stack.push(cons.clone());
+    match cons.__construct__(argument_count as usize).resolve(ctx) {
         Ok(true) => return 0,
         Ok(false) => {}
         Err(e) => { ctx.vm.pending_exception = Some(e); return 1; }
