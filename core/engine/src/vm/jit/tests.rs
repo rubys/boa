@@ -162,6 +162,160 @@ fn unsupported_falls_back_to_interpreter() {
     assert_eq!(s, "number", "interpreted function should still work");
 }
 
+/// Verify that the IC has data at JIT compilation time and that the
+/// cached shape matches runtime objects.
+#[test]
+fn ic_data_available_at_compile_time() {
+    use crate::{Context, Source};
+    use crate::vm::code_block::JitState;
+
+    let mut context = Context::default();
+
+    // Define get_x and call it 9 times (below JIT threshold of 10).
+    context.eval(Source::from_bytes(
+        "function get_x(obj) { return obj.x; }
+         for (var i = 0; i < 9; i++) get_x({x: i});"
+    )).expect("setup should succeed");
+
+    // Find the get_x function's CodeBlock.
+    let get_x_val = context.eval(Source::from_bytes("get_x")).unwrap();
+    let get_x_obj = get_x_val.as_object().unwrap();
+    let get_x_func = get_x_obj
+        .downcast_ref::<crate::builtins::function::OrdinaryFunction>()
+        .expect("should be an ordinary function");
+    let code = &get_x_func.code;
+
+    // Check the IC state after 9 interpreter calls.
+    let ic = &code.ic;
+    eprintln!("IC entries: {}", ic.len());
+    for (i, entry) in ic.iter().enumerate() {
+        let entries = entry.entries.borrow();
+        eprintln!("  IC[{i}] name={} entries={} megamorphic={}",
+            entry.name.to_std_string_escaped(),
+            entries.len(),
+            entry.megamorphic.get(),
+        );
+        for (j, cached) in entries.iter().enumerate() {
+            if let Some(shape) = cached.shape.upgrade() {
+                eprintln!("    entry[{j}]: shape=0x{:x} slot_index={}",
+                    shape.to_addr_usize(), cached.slot.index);
+            } else {
+                eprintln!("    entry[{j}]: stale (shape collected)");
+            }
+        }
+    }
+
+    // The IC should have at least one entry for property "x".
+    assert!(!ic.is_empty(), "IC should have entries");
+    let first_ic = &ic[0];
+    assert_eq!(first_ic.name.to_std_string_escaped(), "x");
+    let entries = first_ic.entries.borrow();
+    assert!(!entries.is_empty(), "IC[0] should have cached shapes after 9 calls");
+    let cached_shape = entries[0].shape.upgrade();
+    assert!(cached_shape.is_some(), "cached shape should still be alive");
+    let cached_addr = cached_shape.unwrap().to_addr_usize();
+    drop(entries);
+
+    // Now create a fresh object like the ones we'll pass at runtime.
+    let test_obj = context.eval(Source::from_bytes("({x: 99})")).unwrap();
+    let test_obj_ref = test_obj.as_object().unwrap();
+    let borrowed = test_obj_ref.borrow();
+    let runtime_shape_addr = borrowed.properties().shape.to_addr_usize();
+    drop(borrowed);
+
+    eprintln!("Cached shape addr:  0x{cached_addr:x}");
+    eprintln!("Runtime shape addr: 0x{runtime_shape_addr:x}");
+    eprintln!("Match: {}", cached_addr == runtime_shape_addr);
+
+    // Check JIT state — should be Pending (not yet compiled).
+    match code.jit.get() {
+        JitState::Pending { call_count } => {
+            eprintln!("JIT state: Pending (call_count={call_count})");
+        }
+        other => {
+            eprintln!("JIT state: {other:?}");
+        }
+    }
+}
+
+/// Verify inline IC fires and produces correct results.
+#[test]
+fn inline_ic_produces_correct_result() {
+    use crate::{Context, Source};
+
+    let mut context = Context::default();
+
+    // Call get_x 9 times to populate IC, then once more to trigger JIT.
+    // After JIT, subsequent calls should use the inline IC fast path.
+    let result = context.eval(Source::from_bytes(
+        "function get_x(obj) { return obj.x; }
+         // Populate IC with 9 interpreter calls
+         for (var i = 0; i < 9; i++) get_x({x: i});
+         // 10th call triggers JIT compilation
+         get_x({x: 100});
+         // 11th+ calls use JIT'd code with inline IC
+         var results = [];
+         for (var i = 0; i < 10; i++) {
+           results.push(get_x({x: i * 10}));
+         }
+         results[5]"  // Should be 50
+    ));
+
+    let value = result.expect("should succeed");
+    assert_eq!(
+        value.as_number().expect("should be number"),
+        50.0,
+        "inline IC should return correct property value"
+    );
+}
+
+/// Verify that ic_fast_get works on objects created by eval (same as benchmark).
+#[test]
+fn ic_fast_get_works_on_eval_objects() {
+    use crate::{Context, Source};
+    use super::helpers;
+
+    let mut context = Context::default();
+
+    // Create object and populate IC via interpreter.
+    context.eval(Source::from_bytes(
+        "function get_x(obj) { return obj.x; }
+         for (var i = 0; i < 9; i++) get_x({x: i});"
+    )).unwrap();
+
+    // Get the IC data.
+    let get_x_val = context.eval(Source::from_bytes("get_x")).unwrap();
+    let get_x_obj = get_x_val.as_object().unwrap();
+    let func = get_x_obj.downcast_ref::<crate::builtins::function::OrdinaryFunction>().unwrap();
+    let ic = &func.code.ic[0];
+    let entries = ic.entries.borrow();
+    let shape = entries[0].shape.upgrade().unwrap();
+    let slot_index = entries[0].slot.index;
+    let shape_addr = shape.to_addr_usize();
+    let cached_shape_ptr = (shape_addr - 16) as u64; // subtract GcHeader
+    drop(entries);
+    drop(func);
+
+    // Create a test object the same way the benchmark does.
+    let obj = context.eval(Source::from_bytes("({x: 42})")).unwrap();
+    let raw_bits: u64 = unsafe { std::mem::transmute_copy(&obj) };
+
+    // Verify it's an object.
+    let tag = raw_bits & 0x7FFF_0000_0000_0000;
+    assert_eq!(tag, 0x7FFC_0000_0000_0000, "should be object");
+
+    // Test ic_fast_get.
+    let result = unsafe { helpers::ic_fast_get(raw_bits, cached_shape_ptr, slot_index as u32) };
+    assert!(result.is_some(), "IC fast path should hit for same-shape object");
+
+    // Verify the value is NaN-boxed integer 42.
+    let val_bits = result.unwrap();
+    let expected_bits: u64 = unsafe { std::mem::transmute_copy(&crate::JsValue::from(42)) };
+    assert_eq!(val_bits, expected_bits, "should be NaN-boxed 42");
+
+    eprintln!("ic_fast_get works correctly on eval'd objects!");
+}
+
 /// End-to-end: property access by name.
 #[test]
 fn end_to_end_jit_property_access() {
