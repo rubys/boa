@@ -214,6 +214,36 @@ impl JitCompiler {
             ("jit_throw", helpers::jit_throw as *const u8),
             ("jit_get_function", helpers::jit_get_function as *const u8),
             ("jit_new", helpers::jit_new as *const u8),
+            ("jit_set_name", helpers::jit_set_name as *const u8),
+            ("jit_get_name_or_undefined", helpers::jit_get_name_or_undefined as *const u8),
+            ("jit_get_name_and_locator", helpers::jit_get_name_and_locator as *const u8),
+            ("jit_get_locator", helpers::jit_get_locator as *const u8),
+            ("jit_set_name_by_locator", helpers::jit_set_name_by_locator as *const u8),
+            ("jit_def_init_var", helpers::jit_def_init_var as *const u8),
+            ("jit_delete_name", helpers::jit_delete_name as *const u8),
+            ("jit_set_property_by_name", helpers::jit_set_property_by_name as *const u8),
+            ("jit_get_property_by_name_with_this", helpers::jit_get_property_by_name_with_this as *const u8),
+            ("jit_define_own_property_by_name", helpers::jit_define_own_property_by_name as *const u8),
+            ("jit_define_own_property_by_value", helpers::jit_define_own_property_by_value as *const u8),
+            ("jit_delete_property_by_name", helpers::jit_delete_property_by_name as *const u8),
+            ("jit_delete_property_by_value", helpers::jit_delete_property_by_value as *const u8),
+            ("jit_to_property_key", helpers::jit_to_property_key as *const u8),
+            ("jit_in", helpers::jit_in as *const u8),
+            ("jit_get_prototype", helpers::jit_get_prototype as *const u8),
+            ("jit_set_prototype", helpers::jit_set_prototype as *const u8),
+            ("jit_store_literal", helpers::jit_store_literal as *const u8),
+            ("jit_store_empty_object", helpers::jit_store_empty_object as *const u8),
+            ("jit_store_new_array", helpers::jit_store_new_array as *const u8),
+            ("jit_store_regexp", helpers::jit_store_regexp as *const u8),
+            ("jit_push_value_to_array", helpers::jit_push_value_to_array as *const u8),
+            ("jit_push_elision_to_array", helpers::jit_push_elision_to_array as *const u8),
+            ("jit_push_scope", helpers::jit_push_scope as *const u8),
+            ("jit_create_unmapped_arguments_object", helpers::jit_create_unmapped_arguments_object as *const u8),
+            ("jit_rest_parameter_init", helpers::jit_rest_parameter_init as *const u8),
+            ("jit_throw_new_type_error", helpers::jit_throw_new_type_error as *const u8),
+            ("jit_throw_new_reference_error", helpers::jit_throw_new_reference_error as *const u8),
+            ("jit_throw_mutate_immutable", helpers::jit_throw_mutate_immutable as *const u8),
+            ("jit_set_register_from_accumulator", helpers::jit_set_register_from_accumulator as *const u8),
             ("jit_check_return", helpers::jit_check_return as *const u8),
             ("jit_get_name_global", helpers::jit_get_name_global as *const u8),
             ("jit_call", helpers::jit_call as *const u8),
@@ -277,11 +307,41 @@ impl JitCompiler {
             ("jit_gt", 3, true),
             ("jit_ge", 3, true),
             ("jit_get_name", 2, true),
+            ("jit_set_name", 2, true),
+            ("jit_get_name_or_undefined", 2, true),
+            ("jit_get_name_and_locator", 2, true),
+            ("jit_get_locator", 1, true),
+            ("jit_set_name_by_locator", 1, true),
+            ("jit_def_init_var", 2, true),
+            ("jit_delete_name", 2, true),
             ("jit_get_property_by_name", 3, true),
+            ("jit_get_property_by_name_with_this", 4, true),
             ("jit_get_length_property", 3, true),
             ("jit_get_property_by_value", 4, true),
             ("jit_get_property_by_value_push", 4, true),
             ("jit_set_property_by_value", 4, true),
+            ("jit_set_property_by_name", 3, true),
+            ("jit_define_own_property_by_name", 3, true),
+            ("jit_define_own_property_by_value", 3, true),
+            ("jit_delete_property_by_name", 2, true),
+            ("jit_delete_property_by_value", 2, true),
+            ("jit_to_property_key", 2, true),
+            ("jit_in", 3, true),
+            ("jit_get_prototype", 1, true),
+            ("jit_set_prototype", 2, true),
+            ("jit_store_literal", 2, false),
+            ("jit_store_empty_object", 1, false),
+            ("jit_store_new_array", 1, false),
+            ("jit_store_regexp", 3, true),
+            ("jit_push_value_to_array", 2, true),
+            ("jit_push_elision_to_array", 1, true),
+            ("jit_push_scope", 1, false),
+            ("jit_create_unmapped_arguments_object", 1, false),
+            ("jit_rest_parameter_init", 1, false),
+            ("jit_throw_new_type_error", 1, true),
+            ("jit_throw_new_reference_error", 1, true),
+            ("jit_throw_mutate_immutable", 1, true),
+            ("jit_set_register_from_accumulator", 1, false),
             ("jit_this", 1, false),           // (ctx, dst)
             ("jit_neg", 1, true),             // (ctx, value) -> u64
             ("jit_pos", 1, true),
@@ -751,6 +811,36 @@ impl JitCompiler {
             clone_val_ref => "jit_clone_value",
             drop_val_ref => "jit_drop_value",
             this_ref => "jit_this",
+            set_name_ref => "jit_set_name",
+            get_name_or_undef_ref => "jit_get_name_or_undefined",
+            get_name_and_loc_ref => "jit_get_name_and_locator",
+            get_locator_ref => "jit_get_locator",
+            set_name_by_loc_ref => "jit_set_name_by_locator",
+            def_init_var_ref => "jit_def_init_var",
+            delete_name_ref => "jit_delete_name",
+            set_prop_name_ref => "jit_set_property_by_name",
+            get_prop_name_this_ref => "jit_get_property_by_name_with_this",
+            def_own_name_ref => "jit_define_own_property_by_name",
+            def_own_val_ref => "jit_define_own_property_by_value",
+            del_prop_name_ref => "jit_delete_property_by_name",
+            del_prop_val_ref => "jit_delete_property_by_value",
+            to_prop_key_ref => "jit_to_property_key",
+            in_ref => "jit_in",
+            get_proto_ref => "jit_get_prototype",
+            set_proto_ref => "jit_set_prototype",
+            store_literal_ref => "jit_store_literal",
+            store_empty_obj_ref => "jit_store_empty_object",
+            store_new_arr_ref => "jit_store_new_array",
+            store_regexp_ref => "jit_store_regexp",
+            push_val_arr_ref => "jit_push_value_to_array",
+            push_elision_ref => "jit_push_elision_to_array",
+            push_scope_ref => "jit_push_scope",
+            create_unmapped_args_ref => "jit_create_unmapped_arguments_object",
+            rest_param_ref => "jit_rest_parameter_init",
+            throw_type_err_ref => "jit_throw_new_type_error",
+            throw_ref_err_ref => "jit_throw_new_reference_error",
+            throw_mutate_ref => "jit_throw_mutate_immutable",
+            set_reg_from_acc_ref => "jit_set_register_from_accumulator",
             neg_ref => "jit_neg",
             pos_ref => "jit_pos",
             bit_not_ref => "jit_bit_not",
@@ -1839,6 +1929,155 @@ impl JitCompiler {
                 Instruction::Throw { src } => {
                     let s = i32const(builder, u32::from(src));
                     Self::emit_fallible_call(builder, throw_ref, &[ctx_ptr, s], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                // --- Variable / binding helpers ---
+                Instruction::SetName { src, binding_index } => {
+                    let s = i32const(builder, u32::from(src));
+                    let b = i32const(builder, u32::from(binding_index));
+                    Self::emit_fallible_call(builder, set_name_ref, &[ctx_ptr, s, b], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::GetNameOrUndefined { dst, binding_index } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let b = i32const(builder, u32::from(binding_index));
+                    Self::emit_fallible_call(builder, get_name_or_undef_ref, &[ctx_ptr, d, b], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::GetNameAndLocator { dst, binding_index } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let b = i32const(builder, u32::from(binding_index));
+                    Self::emit_fallible_call(builder, get_name_and_loc_ref, &[ctx_ptr, d, b], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::GetLocator { binding_index } => {
+                    let b = i32const(builder, u32::from(binding_index));
+                    Self::emit_fallible_call(builder, get_locator_ref, &[ctx_ptr, b], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::SetNameByLocator { src } => {
+                    let s = i32const(builder, u32::from(src));
+                    Self::emit_fallible_call(builder, set_name_by_loc_ref, &[ctx_ptr, s], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::DefInitVar { src, binding_index } => {
+                    let s = i32const(builder, u32::from(src));
+                    let b = i32const(builder, u32::from(binding_index));
+                    Self::emit_fallible_call(builder, def_init_var_ref, &[ctx_ptr, s, b], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::DeleteName { dst, binding_index } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let b = i32const(builder, u32::from(binding_index));
+                    Self::emit_fallible_call(builder, delete_name_ref, &[ctx_ptr, d, b], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::In { dst, lhs, rhs } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let l = i32const(builder, u32::from(lhs));
+                    let r = i32const(builder, u32::from(rhs));
+                    Self::emit_fallible_call(builder, in_ref, &[ctx_ptr, d, l, r], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::ToPropertyKey { src, dst } => {
+                    let s = i32const(builder, u32::from(src));
+                    let d = i32const(builder, u32::from(dst));
+                    Self::emit_fallible_call(builder, to_prop_key_ref, &[ctx_ptr, s, d], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                // --- Property access helpers ---
+                Instruction::SetPropertyByName { value, object, ic_index } => {
+                    let v = i32const(builder, u32::from(value));
+                    let o = i32const(builder, u32::from(object));
+                    let ic = i32const(builder, u32::from(ic_index));
+                    Self::emit_fallible_call(builder, set_prop_name_ref, &[ctx_ptr, v, o, ic], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::GetPropertyByNameWithThis { dst, receiver, value, ic_index } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let r = i32const(builder, u32::from(receiver));
+                    let v = i32const(builder, u32::from(value));
+                    let ic = i32const(builder, u32::from(ic_index));
+                    Self::emit_fallible_call(builder, get_prop_name_this_ref, &[ctx_ptr, d, r, v, ic], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::DefineOwnPropertyByName { object, value, name_index } => {
+                    let o = i32const(builder, u32::from(object));
+                    let v = i32const(builder, u32::from(value));
+                    let n = i32const(builder, u32::from(name_index));
+                    Self::emit_fallible_call(builder, def_own_name_ref, &[ctx_ptr, o, v, n], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::DefineOwnPropertyByValue { value, key, object } => {
+                    let v = i32const(builder, u32::from(value));
+                    let k = i32const(builder, u32::from(key));
+                    let o = i32const(builder, u32::from(object));
+                    Self::emit_fallible_call(builder, def_own_val_ref, &[ctx_ptr, v, k, o], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::DeletePropertyByName { object, name_index } => {
+                    let o = i32const(builder, u32::from(object));
+                    let n = i32const(builder, u32::from(name_index));
+                    Self::emit_fallible_call(builder, del_prop_name_ref, &[ctx_ptr, o, n], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::DeletePropertyByValue { object, key } => {
+                    let o = i32const(builder, u32::from(object));
+                    let k = i32const(builder, u32::from(key));
+                    Self::emit_fallible_call(builder, del_prop_val_ref, &[ctx_ptr, o, k], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::GetPrototype { object } => {
+                    let o = i32const(builder, u32::from(object));
+                    Self::emit_fallible_call(builder, get_proto_ref, &[ctx_ptr, o], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::SetPrototype { object, prototype } => {
+                    let o = i32const(builder, u32::from(object));
+                    let p = i32const(builder, u32::from(prototype));
+                    Self::emit_fallible_call(builder, set_proto_ref, &[ctx_ptr, o, p], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                // --- Object / array creation helpers ---
+                Instruction::StoreLiteral { dst, index } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let idx = i32const(builder, u32::from(index));
+                    builder.ins().call(store_literal_ref, &[ctx_ptr, d, idx]);
+                }
+                Instruction::StoreEmptyObject { dst } => {
+                    let d = i32const(builder, u32::from(dst));
+                    builder.ins().call(store_empty_obj_ref, &[ctx_ptr, d]);
+                }
+                Instruction::StoreNewArray { dst } => {
+                    let d = i32const(builder, u32::from(dst));
+                    builder.ins().call(store_new_arr_ref, &[ctx_ptr, d]);
+                }
+                Instruction::StoreRegexp { dst, pattern_index, flags_index } => {
+                    let d = i32const(builder, u32::from(dst));
+                    let p = i32const(builder, u32::from(pattern_index));
+                    let f = i32const(builder, u32::from(flags_index));
+                    Self::emit_fallible_call(builder, store_regexp_ref, &[ctx_ptr, d, p, f], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::PushValueToArray { value, array } => {
+                    let v = i32const(builder, u32::from(value));
+                    let a = i32const(builder, u32::from(array));
+                    Self::emit_fallible_call(builder, push_val_arr_ref, &[ctx_ptr, v, a], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::PushElisionToArray { array } => {
+                    let a = i32const(builder, u32::from(array));
+                    Self::emit_fallible_call(builder, push_elision_ref, &[ctx_ptr, a], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                // --- Scope helpers ---
+                Instruction::PushScope { scope_index } => {
+                    let s = i32const(builder, u32::from(scope_index));
+                    builder.ins().call(push_scope_ref, &[ctx_ptr, s]);
+                }
+                Instruction::CreateUnmappedArgumentsObject { dst } => {
+                    let d = i32const(builder, u32::from(dst));
+                    builder.ins().call(create_unmapped_args_ref, &[ctx_ptr, d]);
+                }
+                Instruction::RestParameterInit { dst } => {
+                    let d = i32const(builder, u32::from(dst));
+                    builder.ins().call(rest_param_ref, &[ctx_ptr, d]);
+                }
+                Instruction::SetRegisterFromAccumulator { dst } => {
+                    let d = i32const(builder, u32::from(dst));
+                    builder.ins().call(set_reg_from_acc_ref, &[ctx_ptr, d]);
+                }
+                // --- Error helpers ---
+                Instruction::ThrowNewTypeError { message } => {
+                    let m = i32const(builder, u32::from(message));
+                    Self::emit_fallible_call(builder, throw_type_err_ref, &[ctx_ptr, m], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::ThrowNewReferenceError { message } => {
+                    let m = i32const(builder, u32::from(message));
+                    Self::emit_fallible_call(builder, throw_ref_err_ref, &[ctx_ptr, m], error_block, reg_base_var, reg_base_slot, self.ptr_type);
+                }
+                Instruction::ThrowMutateImmutable { index } => {
+                    let i = i32const(builder, u32::from(index));
+                    Self::emit_fallible_call(builder, throw_mutate_ref, &[ctx_ptr, i], error_block, reg_base_var, reg_base_slot, self.ptr_type);
                 }
                 Instruction::GetName { dst, binding_index } => {
                     let d = i32const(builder, u32::from(dst));

@@ -110,18 +110,50 @@ fn is_supported_opcode(opcode: Opcode) -> bool {
             // === Variable / binding access ===
             | Opcode::GetName
             | Opcode::GetNameGlobal
+            | Opcode::GetNameOrUndefined
+            | Opcode::GetNameAndLocator
+            | Opcode::GetLocator
+            | Opcode::SetName
+            | Opcode::SetNameByLocator
+            | Opcode::DefInitVar
+            | Opcode::DeleteName
+            | Opcode::In
+            | Opcode::ToPropertyKey
             // === Property access ===
             | Opcode::GetPropertyByName
+            | Opcode::GetPropertyByNameWithThis
             | Opcode::GetLengthProperty
             | Opcode::GetPropertyByValue
             | Opcode::GetPropertyByValuePush
             | Opcode::SetPropertyByValue
+            | Opcode::SetPropertyByName
+            | Opcode::DefineOwnPropertyByName
+            | Opcode::DefineOwnPropertyByValue
+            | Opcode::DeletePropertyByName
+            | Opcode::DeletePropertyByValue
+            | Opcode::GetPrototype
+            | Opcode::SetPrototype
+            // === Object / array creation ===
+            | Opcode::StoreLiteral
+            | Opcode::StoreEmptyObject
+            | Opcode::StoreNewArray
+            | Opcode::StoreRegexp
+            | Opcode::PushValueToArray
+            | Opcode::PushElisionToArray
             // === Function ===
             | Opcode::GetFunction
             | Opcode::Call
             | Opcode::New
+            // === Scope ===
+            | Opcode::PushScope
+            | Opcode::CreateUnmappedArgumentsObject
+            | Opcode::RestParameterInit
+            | Opcode::SetRegisterFromAccumulator
             // === Error ===
             | Opcode::Throw
+            | Opcode::ThrowNewTypeError
+            | Opcode::ThrowNewReferenceError
+            | Opcode::ThrowMutateImmutable
             // === Return ===
             | Opcode::CheckReturn
             | Opcode::Return
