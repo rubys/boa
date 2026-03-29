@@ -100,6 +100,10 @@ jit = [
     "dep:cranelift-native",
 ]
 
+# JIT call statistics (direct vs slow calls, compilation counts).
+# Prints summary to stderr at process exit. Requires `jit`.
+jit-stats = ["jit"]
+
 [dependencies]
 tag_ptr.workspace = true
 boa_interner.workspace = true

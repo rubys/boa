@@ -9,6 +9,58 @@
 
 use crate::{Context, JsValue, value::JsVariant};
 
+// ---------------------------------------------------------------------------
+// JIT call statistics (compiled in only with the `jit-stats` feature)
+// ---------------------------------------------------------------------------
+#[cfg(feature = "jit-stats")]
+pub(crate) mod stats {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static DIRECT_CALLS: AtomicU64 = AtomicU64::new(0);
+    static SLOW_CALLS: AtomicU64 = AtomicU64::new(0);
+    static COMPILATIONS: AtomicU64 = AtomicU64::new(0);
+    static UNSUPPORTED: AtomicU64 = AtomicU64::new(0);
+
+    pub(crate) fn record_direct_call() {
+        DIRECT_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn record_slow_call() {
+        SLOW_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn record_compilation() {
+        COMPILATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+    pub(crate) fn record_unsupported() {
+        UNSUPPORTED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    extern "C" fn print_stats() {
+        let direct = DIRECT_CALLS.load(Ordering::Relaxed);
+        let slow = SLOW_CALLS.load(Ordering::Relaxed);
+        let compiled = COMPILATIONS.load(Ordering::Relaxed);
+        let unsupported = UNSUPPORTED.load(Ordering::Relaxed);
+        let total = direct + slow;
+        if total > 0 {
+            eprintln!(
+                "[jit-stats] calls: {total} total, {direct} direct ({:.1}%), {slow} slow | compiled: {compiled}, unsupported: {unsupported}",
+                direct as f64 / total as f64 * 100.0,
+            );
+        }
+    }
+
+    /// Register the stats printer to run at process exit (once).
+    pub(crate) fn register() {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            unsafe extern "C" {
+                safe fn atexit(f: extern "C" fn()) -> std::ffi::c_int;
+            }
+            atexit(print_stats);
+        });
+    }
+}
+
 /// Precomputed byte offsets from a JsObject's raw GC pointer to the fields
 /// needed for inline caching. These are computed from struct layouts using
 /// `offset_of!` and runtime probing rather than hardcoded, so they remain
@@ -882,6 +934,21 @@ fn jit_call_inner(ctx: &mut Context, argument_count: u32) -> u64 {
         return 1;
     };
 
+    // Try direct JIT-to-JIT call: if the callee is an OrdinaryFunction with
+    // compiled JIT code, set up the frame ourselves and call its native code
+    // directly, bypassing the interpreter dispatch loop entirely.
+    #[cfg(feature = "jit-stats")]
+    stats::register();
+
+    if let Some(result) = try_direct_jit_call(&object, argument_count, ctx) {
+        #[cfg(feature = "jit-stats")]
+        stats::record_direct_call();
+        return result;
+    }
+    #[cfg(feature = "jit-stats")]
+    stats::record_slow_call();
+
+    // Slow path: go through the normal resolve() + interpreter dispatch.
     // resolve() sets up the frame. If it returns Ok(true) = Complete,
     // the result is already on the stack (native function).
     // If Ok(false) = Ready, we need to run the frame.
@@ -922,6 +989,191 @@ fn jit_call_inner(ctx: &mut Context, argument_count: u32) -> u64 {
         crate::vm::CompletionRecord::Normal(_) => {
             // Shouldn't happen with exit_early, but handle gracefully.
             0
+        }
+    }
+}
+
+/// Attempt a direct JIT-to-JIT call. Returns `Some(tag)` if the callee was
+/// called directly via its JIT function pointer, or `None` to fall back to
+/// the normal interpreter path.
+fn try_direct_jit_call(
+    object: &crate::JsObject,
+    argument_count: u32,
+    ctx: &mut Context,
+) -> Option<u64> {
+    use crate::builtins::function::OrdinaryFunction;
+    use crate::environments::{FunctionSlots, ThisBindingStatus};
+    use crate::vm::call_frame::CallFrameFlags;
+    use crate::vm::{CallFrame, CodeBlock};
+    use boa_ast::scope::BindingLocatorScope;
+
+    let function = object.downcast_ref::<OrdinaryFunction>()?;
+
+    // Don't direct-call class constructors.
+    if function.code.is_class_constructor() {
+        return None;
+    }
+
+    let code = function.code.clone();
+    let environments = function.environments.clone();
+    let script_or_module = function.script_or_module.clone();
+    let realm = function.realm().clone();
+    drop(function);
+
+    // Check JIT state: only proceed if already compiled, or trigger compilation
+    // if at threshold.
+    let jit_fn = match code.jit.get() {
+        crate::vm::code_block::JitState::Compiled(jit_fn) => jit_fn,
+        crate::vm::code_block::JitState::Pending { call_count } => {
+            let new_count = call_count + 1;
+            if new_count < 10 {
+                // Not yet at threshold — update count and fall back.
+                code.jit.set(crate::vm::code_block::JitState::Pending {
+                    call_count: new_count,
+                });
+                return None;
+            }
+            // At threshold — try to compile now.
+            let compiler = ctx.vm.jit_compiler.get_or_insert_with(|| {
+                crate::vm::jit::JitCompiler::new().expect("JIT compiler should initialize")
+            });
+            match compiler.compile(&code) {
+                Some(jit_fn) => {
+                    code.jit.set(crate::vm::code_block::JitState::Compiled(jit_fn));
+                    #[cfg(feature = "jit-stats")]
+                    stats::record_compilation();
+                    jit_fn
+                }
+                None => {
+                    code.jit
+                        .set(crate::vm::code_block::JitState::Unsupported);
+                    #[cfg(feature = "jit-stats")]
+                    stats::record_unsupported();
+                    return None;
+                }
+            }
+        }
+        crate::vm::code_block::JitState::Unsupported => return None,
+    };
+
+    // === Frame setup (mirrors function_call in builtins/function/mod.rs) ===
+
+    let env_fp = environments.len() as u32;
+    let frame = CallFrame::new(code.clone(), script_or_module, environments, realm)
+        .with_argument_count(argument_count)
+        .with_env_fp(env_fp);
+
+    ctx.vm.push_frame(frame);
+    ctx.vm.set_return_value(JsValue::undefined());
+
+    // Handle `this` binding.
+    let lexical_this_mode =
+        ctx.vm.frame().code_block.this_mode == crate::builtins::function::ThisMode::Lexical;
+    let this = if lexical_this_mode {
+        ThisBindingStatus::Lexical
+    } else {
+        let this = ctx.vm.stack.get_this(ctx.vm.frame());
+        if ctx.vm.frame().code_block.strict() {
+            ctx.vm.frame_mut().flags |= CallFrameFlags::THIS_VALUE_CACHED;
+            ThisBindingStatus::Initialized(this)
+        } else if this.is_null_or_undefined() {
+            ctx.vm.frame_mut().flags |= CallFrameFlags::THIS_VALUE_CACHED;
+            let this: JsValue = ctx.realm().global_this().clone().into();
+            ctx.vm.stack.set_this(
+                ctx.vm.frames.last().expect("frame must exist"),
+                this.clone(),
+            );
+            ThisBindingStatus::Initialized(this)
+        } else {
+            match this.to_object(ctx) {
+                Ok(obj) => {
+                    let this: JsValue = obj.into();
+                    ctx.vm.frame_mut().flags |= CallFrameFlags::THIS_VALUE_CACHED;
+                    ctx.vm.stack.set_this(
+                        ctx.vm.frames.last().expect("frame must exist"),
+                        this.clone(),
+                    );
+                    ThisBindingStatus::Initialized(this)
+                }
+                Err(err) => {
+                    // `this` coercion failed — clean up frame and propagate error.
+                    let frame = ctx.vm.frames.last().expect("frame must exist");
+                    ctx.vm.stack.truncate_to_frame(frame);
+                    ctx.vm.pop_frame();
+                    ctx.vm.pending_exception = Some(err);
+                    return Some(1);
+                }
+            }
+        }
+    };
+
+    // Push binding identifier environment if needed.
+    let mut last_env = 0;
+    let has_binding_identifier = ctx.vm.frame().code_block().has_binding_identifier();
+    let has_function_scope = ctx.vm.frame().code_block().has_function_scope();
+
+    if has_binding_identifier {
+        let frame = ctx.vm.frame_mut();
+        let global = frame.realm.environment();
+        let index = frame.environments.push_lexical(1, global);
+        frame.environments.put_lexical_value(
+            BindingLocatorScope::Stack(index),
+            0,
+            object.clone().into(),
+            global,
+        );
+        last_env += 1;
+    }
+
+    if has_function_scope {
+        let scope = ctx.vm.frame().code_block().constant_scope(last_env);
+        let frame = ctx.vm.frame_mut();
+        let global = frame.realm.environment();
+        frame.environments.push_function(
+            scope,
+            FunctionSlots::new(this, object.clone(), None),
+            global,
+        );
+    }
+
+    // Set EXIT_EARLY so the callee's Return opcode returns to us.
+    ctx.vm.frame_mut().flags |= CallFrameFlags::EXIT_EARLY;
+
+    // Ensure stack capacity (the outer JitFn::call already reserved, but
+    // nested calls may need more).
+    let needed =
+        ctx.vm.stack.stack.len() + ctx.vm.runtime_limits.recursion_limit() * 72;
+    if ctx.vm.stack.stack.capacity() < needed {
+        ctx.vm
+            .stack
+            .stack
+            .reserve(needed - ctx.vm.stack.stack.len());
+    }
+
+    // Compute callee's reg_base and call the JIT function directly.
+    let rp = ctx.vm.frame().rp as usize;
+    let reg_base = ctx.vm.stack.stack[rp..].as_mut_ptr().cast::<u64>();
+    let tag = unsafe { jit_fn.call_raw(ctx as *mut Context, reg_base) };
+
+    match tag {
+        0 => {
+            // Normal return: handle_return inside the callee already popped
+            // the frame and pushed the result. Nothing more to do.
+            Some(0)
+        }
+        1 => {
+            // exit_early: handle_return truncated stack but didn't pop frame.
+            let result = ctx.vm.take_return_value();
+            let frame = ctx.vm.frames.last().expect("callee frame must exist");
+            ctx.vm.stack.truncate_to_frame(frame);
+            ctx.vm.pop_frame();
+            ctx.vm.stack.push(result);
+            Some(0)
+        }
+        _ => {
+            // Exception: pending_exception is already set by the callee.
+            // The callee's frame may still be on the stack — clean up.
+            Some(1)
         }
     }
 }

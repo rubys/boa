@@ -16,6 +16,10 @@ compile_error!("JIT compilation requires a 64-bit target");
 compile_error!("The `jit` feature is incompatible with `jsvalue-enum`; the JIT assumes a NaN-boxed JsValue layout.");
 
 mod compiler;
+// pub(crate) when jit-stats needs access from vm/mod.rs
+#[cfg(feature = "jit-stats")]
+pub(crate) mod helpers;
+#[cfg(not(feature = "jit-stats"))]
 mod helpers;
 
 #[cfg(test)]
