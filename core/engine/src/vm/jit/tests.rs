@@ -393,3 +393,551 @@ fn end_to_end_jit_fib() {
         "JIT'd fib(10) should return 55"
     );
 }
+
+// ============================================================
+// Comprehensive opcode test suite.
+// Each test calls a function enough times to trigger JIT (20x),
+// then verifies the result is correct.
+// ============================================================
+
+/// Helper: evaluate JS, expect a numeric result.
+fn eval_num(code: &str) -> f64 {
+    let mut ctx = crate::Context::default();
+    let result = ctx.eval(crate::Source::from_bytes(code));
+    let value = result.unwrap_or_else(|e| panic!("JS error: {e}"));
+    value.as_number().unwrap_or_else(|| panic!("expected number, got {:?}", value))
+}
+
+/// Helper: evaluate JS, expect a string result.
+fn eval_str(code: &str) -> String {
+    let mut ctx = crate::Context::default();
+    let result = ctx.eval(crate::Source::from_bytes(code));
+    let value = result.unwrap_or_else(|e| panic!("JS error: {e}"));
+    value.as_string().unwrap_or_else(|| panic!("expected string, got {:?}", value))
+        .to_std_string_escaped()
+}
+
+/// Helper: evaluate JS, expect a boolean result.
+fn eval_bool(code: &str) -> bool {
+    let mut ctx = crate::Context::default();
+    let result = ctx.eval(crate::Source::from_bytes(code));
+    let value = result.unwrap_or_else(|e| panic!("JS error: {e}"));
+    value.as_boolean().unwrap_or_else(|| panic!("expected boolean, got {:?}", value))
+}
+
+/// Wrap code in a function called 20 times to trigger JIT.
+fn jit_call(body: &str, call: &str) -> String {
+    format!("{body}\nfor (var _jit_i = 0; _jit_i < 20; _jit_i++) {{ {call} }}\n{call}")
+}
+
+// --- Store constants ---
+
+#[test]
+fn op_store_zero() {
+    assert_eq!(eval_num(&jit_call("function f() { return 0; }", "f()")), 0.0);
+}
+
+#[test]
+fn op_store_one() {
+    assert_eq!(eval_num(&jit_call("function f() { return 1; }", "f()")), 1.0);
+}
+
+#[test]
+fn op_store_int8() {
+    assert_eq!(eval_num(&jit_call("function f() { return 42; }", "f()")), 42.0);
+}
+
+#[test]
+fn op_store_int32() {
+    assert_eq!(eval_num(&jit_call("function f() { return 100000; }", "f()")), 100000.0);
+}
+
+#[test]
+fn op_store_float() {
+    assert_eq!(eval_num(&jit_call("function f() { return 3.14; }", "f()")), 3.14);
+}
+
+#[test]
+fn op_store_null() {
+    let code = jit_call("function f() { return null === null; }", "f()");
+    assert!(eval_bool(&code));
+}
+
+#[test]
+fn op_store_true_false() {
+    assert!(eval_bool(&jit_call("function f() { return true; }", "f()")));
+    assert!(!eval_bool(&jit_call("function f() { return false; }", "f()")));
+}
+
+#[test]
+fn op_store_undefined() {
+    let code = jit_call("function f() { return undefined === undefined; }", "f()");
+    assert!(eval_bool(&code));
+}
+
+// --- Arithmetic ---
+
+#[test]
+fn op_add_integers() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a+b; }", "f(3,4)")), 7.0);
+}
+
+#[test]
+fn op_add_floats() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a+b; }", "f(1.5, 2.5)")), 4.0);
+}
+
+#[test]
+fn op_add_string_concat() {
+    assert_eq!(eval_str(&jit_call("function f(a,b) { return a+b; }", "f('hello', ' world')")), "hello world");
+}
+
+#[test]
+fn op_sub() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a-b; }", "f(10,3)")), 7.0);
+}
+
+#[test]
+fn op_mul() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a*b; }", "f(6,7)")), 42.0);
+}
+
+#[test]
+fn op_div() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a/b; }", "f(10,4)")), 2.5);
+}
+
+#[test]
+fn op_mod() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a%b; }", "f(10,3)")), 1.0);
+}
+
+#[test]
+fn op_pow() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a**b; }", "f(2,10)")), 1024.0);
+}
+
+#[test]
+fn op_neg() {
+    assert_eq!(eval_num(&jit_call("function f(x) { return -x; }", "f(42)")), -42.0);
+}
+
+#[test]
+fn op_pos() {
+    assert_eq!(eval_num(&jit_call("function f(x) { return +x; }", "f('42')")), 42.0);
+}
+
+#[test]
+fn op_inc_dec() {
+    assert_eq!(eval_num(&jit_call("function f(x) { x++; return x; }", "f(5)")), 6.0);
+    assert_eq!(eval_num(&jit_call("function f(x) { x--; return x; }", "f(5)")), 4.0);
+}
+
+// --- Bitwise ---
+
+#[test]
+fn op_bit_or() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a|b; }", "f(5,3)")), 7.0);
+}
+
+#[test]
+fn op_bit_and() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a&b; }", "f(5,3)")), 1.0);
+}
+
+#[test]
+fn op_bit_xor() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a^b; }", "f(5,3)")), 6.0);
+}
+
+#[test]
+fn op_bit_not() {
+    assert_eq!(eval_num(&jit_call("function f(x) { return ~x; }", "f(0)")), -1.0);
+}
+
+#[test]
+fn op_shift_left() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a<<b; }", "f(1,4)")), 16.0);
+}
+
+#[test]
+fn op_shift_right() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a>>b; }", "f(16,2)")), 4.0);
+}
+
+#[test]
+fn op_unsigned_shift_right() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a>>>b; }", "f(-1,28)")), 15.0);
+}
+
+// --- Comparison ---
+
+#[test]
+fn op_strict_eq() {
+    assert!(eval_bool(&jit_call("function f(a,b) { return a===b; }", "f(42,42)")));
+    assert!(!eval_bool(&jit_call("function f(a,b) { return a===b; }", "f(42,43)")));
+}
+
+#[test]
+fn op_eq() {
+    assert!(eval_bool(&jit_call("function f(a,b) { return a==b; }", "f(0,false)")));
+}
+
+#[test]
+fn op_less_than() {
+    assert!(eval_bool(&jit_call("function f(a,b) { return a<b; }", "f(1,2)")));
+    assert!(!eval_bool(&jit_call("function f(a,b) { return a<b; }", "f(2,1)")));
+}
+
+#[test]
+fn op_greater_than() {
+    assert!(eval_bool(&jit_call("function f(a,b) { return a>b; }", "f(2,1)")));
+}
+
+#[test]
+fn op_instance_of() {
+    assert!(eval_bool(&jit_call(
+        "function Foo() {} function f(x) { return x instanceof Foo; }",
+        "f(new Foo())"
+    )));
+}
+
+#[test]
+fn op_typeof() {
+    assert_eq!(eval_str(&jit_call("function f(x) { return typeof x; }", "f(42)")), "number");
+    assert_eq!(eval_str(&jit_call("function f(x) { return typeof x; }", "f('hi')")), "string");
+}
+
+#[test]
+fn op_is_object() {
+    // IsObject is used internally, test via typeof/truthiness patterns
+    assert!(eval_bool(&jit_call(
+        "function f(x) { return typeof x === 'object' && x !== null; }",
+        "f({})"
+    )));
+}
+
+// --- Logical ---
+
+#[test]
+fn op_logical_and() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a && b; }", "f(1,42)")), 42.0);
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a && b; }", "f(0,42)")), 0.0);
+}
+
+#[test]
+fn op_logical_or() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a || b; }", "f(0,42)")), 42.0);
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a || b; }", "f(1,42)")), 1.0);
+}
+
+#[test]
+fn op_logical_not() {
+    assert!(eval_bool(&jit_call("function f(x) { return !x; }", "f(false)")));
+    assert!(!eval_bool(&jit_call("function f(x) { return !x; }", "f(true)")));
+}
+
+#[test]
+fn op_coalesce() {
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a ?? b; }", "f(null,42)")), 42.0);
+    assert_eq!(eval_num(&jit_call("function f(a,b) { return a ?? b; }", "f(7,42)")), 7.0);
+}
+
+// --- Control flow ---
+
+#[test]
+fn op_if_else() {
+    assert_eq!(eval_num(&jit_call(
+        "function f(x) { if (x > 0) return 1; else return -1; }",
+        "f(5)"
+    )), 1.0);
+}
+
+#[test]
+fn op_for_loop() {
+    assert_eq!(eval_num(&jit_call(
+        "function f(n) { var s=0; for(var i=0;i<n;i++) s+=i; return s; }",
+        "f(10)"
+    )), 45.0);
+}
+
+#[test]
+fn op_while_loop() {
+    assert_eq!(eval_num(&jit_call(
+        "function f(n) { var s=0; var i=0; while(i<n) { s+=i; i++; } return s; }",
+        "f(10)"
+    )), 45.0);
+}
+
+#[test]
+fn op_switch_case() {
+    assert_eq!(eval_num(&jit_call(
+        "function f(x) { switch(x) { case 1: return 10; case 2: return 20; default: return 0; } }",
+        "f(2)"
+    )), 20.0);
+}
+
+// --- This / constructors ---
+
+#[test]
+fn op_this_simple() {
+    assert_eq!(eval_num(&jit_call(
+        "function Foo(x) { this.x = x; } function f() { return new Foo(42).x; }",
+        "f()"
+    )), 42.0);
+}
+
+#[test]
+fn op_this_method() {
+    assert_eq!(eval_num(&jit_call(
+        "function Obj(v) { this.v = v; this.get = function() { return this.v; }; }
+         function f() { var o = new Obj(99); return o.get(); }",
+        "f()"
+    )), 99.0);
+}
+
+#[test]
+fn op_new_constructor() {
+    assert!(eval_bool(&jit_call(
+        "function Foo() {} function f() { return (new Foo()) instanceof Foo; }",
+        "f()"
+    )));
+}
+
+// --- Property access ---
+
+#[test]
+fn op_get_set_property_by_name() {
+    assert_eq!(eval_num(&jit_call(
+        "function f(obj) { obj.x = 10; return obj.x; }",
+        "f({})"
+    )), 10.0);
+}
+
+#[test]
+fn op_get_set_property_by_value() {
+    assert_eq!(eval_num(&jit_call(
+        "function f(arr, i) { arr[i] = 42; return arr[i]; }",
+        "f([0,0,0], 1)"
+    )), 42.0);
+}
+
+#[test]
+fn op_array_length() {
+    assert_eq!(eval_num(&jit_call(
+        "function f(arr) { return arr.length; }",
+        "f([1,2,3,4,5])"
+    )), 5.0);
+}
+
+#[test]
+fn op_delete_property() {
+    assert!(eval_bool(&jit_call(
+        "function f() { var o = {x:1}; delete o.x; return o.x === undefined; }",
+        "f()"
+    )));
+}
+
+#[test]
+fn op_in_operator() {
+    assert!(eval_bool(&jit_call(
+        "function f() { return 'x' in {x:1}; }",
+        "f()"
+    )));
+}
+
+#[test]
+fn op_define_own_property() {
+    assert_eq!(eval_num(&jit_call(
+        "function f() { var o = {}; o.x = 42; return o.x; }",
+        "f()"
+    )), 42.0);
+}
+
+// --- Array / object creation ---
+
+#[test]
+fn op_array_literal() {
+    assert_eq!(eval_num(&jit_call(
+        "function f() { var a = [10, 20, 30]; return a[1]; }",
+        "f()"
+    )), 20.0);
+}
+
+#[test]
+fn op_object_literal() {
+    assert_eq!(eval_num(&jit_call(
+        "function f() { var o = {a: 1, b: 2}; return o.a + o.b; }",
+        "f()"
+    )), 3.0);
+}
+
+#[test]
+fn op_empty_object() {
+    assert!(eval_bool(&jit_call(
+        "function f() { var o = {}; return typeof o === 'object'; }",
+        "f()"
+    )));
+}
+
+// --- Variable binding ---
+
+#[test]
+fn op_var_declaration() {
+    assert_eq!(eval_num(&jit_call(
+        "function f() { var x = 10; var y = 20; return x + y; }",
+        "f()"
+    )), 30.0);
+}
+
+#[test]
+fn op_let_const() {
+    assert_eq!(eval_num(&jit_call(
+        "function f() { let x = 10; const y = 20; return x + y; }",
+        "f()"
+    )), 30.0);
+}
+
+#[test]
+fn op_closure_variable() {
+    assert_eq!(eval_num(&jit_call(
+        "function outer() { var x = 42; function inner() { return x; } return inner(); }",
+        "outer()"
+    )), 42.0);
+}
+
+// --- Function calls ---
+
+#[test]
+fn op_call_simple() {
+    assert_eq!(eval_num(&jit_call(
+        "function add(a,b) { return a+b; } function f() { return add(3,4); }",
+        "f()"
+    )), 7.0);
+}
+
+#[test]
+fn op_recursive_call() {
+    assert_eq!(eval_num(&jit_call(
+        "function fib(n) { if(n<=1) return n; return fib(n-1)+fib(n-2); }",
+        "fib(10)"
+    )), 55.0);
+}
+
+#[test]
+fn op_get_function() {
+    assert_eq!(eval_num(&jit_call(
+        "function outer() { function inner() { return 42; } return inner(); }",
+        "outer()"
+    )), 42.0);
+}
+
+// --- Error handling ---
+
+#[test]
+fn op_throw_catch() {
+    assert_eq!(eval_num(&jit_call(
+        "function f() { try { throw 42; } catch(e) { return e; } }",
+        "f()"
+    )), 42.0);
+}
+
+// --- Scope ---
+
+#[test]
+fn op_block_scope() {
+    assert_eq!(eval_num(&jit_call(
+        "function f() { var x = 1; { let x = 2; } return x; }",
+        "f()"
+    )), 1.0);
+}
+
+#[test]
+fn op_push_scope_loop() {
+    assert_eq!(eval_num(&jit_call(
+        "function f() { var s = 0; for (let i = 0; i < 5; i++) { s += i; } return s; }",
+        "f()"
+    )), 10.0);
+}
+
+// --- Combined patterns ---
+
+#[test]
+fn pattern_accumulator_loop() {
+    assert_eq!(eval_num(&jit_call(
+        "function f(n) { var s=0; for(var i=0;i<n;i++) s=(s+i)|0; return s; }",
+        "f(100)"
+    )), 4950.0);
+}
+
+#[test]
+fn pattern_branchy_loop() {
+    let code = jit_call(
+        "function f(n) {
+           var count = 0;
+           for (var i = 0; i < n; i++) {
+             if (i % 3 === 0) count++;
+             else if (i % 5 === 0) count--;
+             else count = (count + i) | 0;
+           }
+           return count;
+         }",
+        "f(100)"
+    );
+    // Compute expected value
+    let mut count: i32 = 0;
+    for i in 0..100 {
+        if i % 3 == 0 { count += 1; }
+        else if i % 5 == 0 { count -= 1; }
+        else { count = count.wrapping_add(i); }
+    }
+    assert_eq!(eval_num(&code), f64::from(count));
+}
+
+#[test]
+fn pattern_property_loop() {
+    assert_eq!(eval_num(&jit_call(
+        "function f(obj, n) { var s=0; for(var i=0;i<n;i++) s+=obj.x; return s; }",
+        "f({x:7}, 100)"
+    )), 700.0);
+}
+
+#[test]
+fn pattern_array_sum() {
+    assert_eq!(eval_num(&jit_call(
+        "function f(arr) { var s=0; for(var i=0;i<arr.length;i++) s+=arr[i]; return s; }",
+        "f([1,2,3,4,5])"
+    )), 15.0);
+}
+
+#[test]
+fn pattern_constructor_with_methods() {
+    assert_eq!(eval_num(&jit_call(
+        "function Point(x,y) { this.x=x; this.y=y; }
+         Point.prototype.sum = function() { return this.x + this.y; };
+         function f() { var p = new Point(3,4); return p.sum(); }",
+        "f()"
+    )), 7.0);
+}
+
+#[test]
+fn pattern_nested_property_access() {
+    assert_eq!(eval_num(&jit_call(
+        "function f() { var o = {a: {b: {c: 42}}}; return o.a.b.c; }",
+        "f()"
+    )), 42.0);
+}
+
+#[test]
+fn pattern_array_of_objects() {
+    assert_eq!(eval_num(&jit_call(
+        "function f() {
+           var arr = [];
+           for (var i = 0; i < 5; i++) arr.push({v: i * 10});
+           var s = 0;
+           for (var i = 0; i < arr.length; i++) s += arr[i].v;
+           return s;
+         }",
+        "f()"
+    )), 100.0);
+}
