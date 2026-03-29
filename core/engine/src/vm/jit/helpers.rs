@@ -9,6 +9,37 @@
 
 use crate::{Context, JsValue, value::JsVariant};
 
+/// Report the memory layout offsets needed for inline caching.
+#[cfg(test)]
+pub(super) fn report_ic_offsets() {
+    use crate::JsObject;
+
+    let obj = JsObject::with_null_proto();
+    let js_val = JsValue::from(obj.clone());
+    let raw_bits: u64 = unsafe { std::mem::transmute_copy(&js_val) };
+    let gc_ptr = (raw_bits & 0x0000_FFFF_FFFF_FFFF) as *const u8;
+
+    let borrowed = obj.borrow();
+    let shape_ptr = &borrowed.properties().shape as *const _ as *const u8;
+    let storage_ptr = &borrowed.properties().storage as *const _ as *const u8;
+
+    let shape_offset = unsafe { shape_ptr.offset_from(gc_ptr) };
+    let storage_offset = unsafe { storage_ptr.offset_from(gc_ptr) };
+
+    eprintln!("=== JIT IC Layout ===");
+    eprintln!("gc_ptr: {gc_ptr:p}");
+    eprintln!("shape offset from gc_ptr: {shape_offset}");
+    eprintln!("storage offset from gc_ptr: {storage_offset}");
+    eprintln!("sizeof Shape: {}", size_of::<crate::object::shape::Shape>());
+
+    // Check what shape.to_addr_usize() returns vs the raw bytes at the shape offset
+    let shape_addr = borrowed.properties().shape.to_addr_usize();
+    let raw_at_shape = unsafe { *(shape_ptr as *const usize) };
+    eprintln!("shape.to_addr_usize(): 0x{shape_addr:x}");
+    eprintln!("raw usize at shape offset: 0x{raw_at_shape:x}");
+    eprintln!("=== End IC Layout ===");
+}
+
 /// Increment the refcount for a GC'd JsValue given its raw NaN-boxed u64.
 ///
 /// Called by the JIT after copying a pointer-typed value to a new register.
