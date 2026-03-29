@@ -528,31 +528,53 @@ pub(super) extern "C" fn jit_get_name(ctx: &mut Context, dst: u32, binding_index
     }
 }
 
-/// `GetPropertyByName` — `obj.prop` read. Returns 0 on success, 1 on exception.
+/// `GetPropertyByName` — `obj.prop` read with IC fast path.
+/// Returns 0 on success, 1 on exception.
 pub(super) extern "C" fn jit_get_property_by_name(
     ctx: &mut Context,
     dst: u32,
     object: u32,
     ic_index: u32,
 ) -> u64 {
+    use crate::object::shape::slot::SlotAttributes;
+
     let object_val = ctx.vm.get_register(object as usize).clone();
 
-    let ic_len = ctx.vm.frame().code_block().ic.len();
-    if (ic_index as usize) >= ic_len {
-        eprintln!("[JIT] IC index out of bounds: ic_index={ic_index} ic_len={ic_len}");
-        ctx.vm.pending_exception = Some(
-            crate::JsNativeError::error()
-                .with_message("JIT: IC index out of bounds")
-                .into(),
-        );
-        return 1;
-    }
+    let result = (|| -> crate::JsResult<JsValue> {
+        let Some(object_obj) = object_val.as_object() else {
+            // Non-object: fall through to slow path
+            let object_obj = object_val.to_object(ctx)?;
+            let key = ctx.vm.frame().code_block().ic[ic_index as usize].name.clone();
+            let key = crate::property::PropertyKey::from(key);
+            return object_obj.__get__(&key, object_val, &mut ctx.into());
+        };
 
-    let result = (|| {
-        let key = ctx.vm.frame().code_block().ic[ic_index as usize]
-            .name
-            .clone();
-        let object_obj = object_val.to_object(ctx)?;
+        // IC fast path: check the inline cache
+        let ic = &ctx.vm.frame().code_block().ic[ic_index as usize];
+        let object_borrowed = object_obj.borrow();
+        if let Some((shape, slot)) = ic.get(object_borrowed.shape()) {
+            let mut result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+                let prototype = shape.prototype().expect("prototype should have value");
+                let prototype = prototype.borrow();
+                prototype.properties().storage[slot.index as usize].clone()
+            } else {
+                object_borrowed.properties().storage[slot.index as usize].clone()
+            };
+
+            drop(object_borrowed);
+            if slot.attributes.has_get() && result.is_object() {
+                result = result.as_object().expect("should be getter").call(
+                    &object_val,
+                    &[],
+                    ctx,
+                )?;
+            }
+            return Ok(result);
+        }
+        drop(object_borrowed);
+
+        // IC miss: full lookup
+        let key = ic.name.clone();
         let key = crate::property::PropertyKey::from(key);
         object_obj.__get__(&key, object_val, &mut ctx.into())
     })();
