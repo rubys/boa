@@ -75,9 +75,13 @@ impl JitFn {
             .runtime_limits
             .recursion_limit()
             .saturating_mul(72);
-        let needed = current_len
-            .saturating_add(extra)
-            .min(MAX_JIT_STACK_RESERVE.max(current_len));
+        let uncapped = current_len.saturating_add(extra);
+        let needed = uncapped.min(MAX_JIT_STACK_RESERVE.max(current_len));
+        if uncapped > MAX_JIT_STACK_RESERVE.max(current_len) {
+            // Required reservation exceeds cap — fall back to interpreter
+            // to avoid potential reg_base invalidation during deep recursion.
+            return context.run();
+        }
         if context.vm.stack.stack.capacity() < needed {
             let additional = needed.saturating_sub(current_len);
             if additional > 0 {

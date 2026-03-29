@@ -146,20 +146,21 @@ fn unsupported_falls_back_to_interpreter() {
 
     let mut context = Context::default();
 
-    // typeof uses TypeOf opcode which is not JIT-supported.
+    // for-in uses CreateForInIterator which is not JIT-supported.
+    // The function still works correctly via the interpreter.
     let result = context.eval(Source::from_bytes(
-        "function check(x) { return typeof x; }
+        "function keys(obj) { var r = []; for (var k in obj) r.push(k); return r.length; }
          var r;
-         for (var i = 0; i < 20; i++) { r = check(42); }
+         for (var i = 0; i < 20; i++) { r = keys({a:1, b:2}); }
          r",
     ));
 
     let value = result.expect("should succeed");
-    let s = value
-        .as_string()
-        .expect("should be string")
-        .to_std_string_escaped();
-    assert_eq!(s, "number", "interpreted function should still work");
+    assert_eq!(
+        value.as_number().expect("should be number"),
+        2.0,
+        "interpreted function should still work"
+    );
 }
 
 /// Verify that the IC has data at JIT compilation time and that the

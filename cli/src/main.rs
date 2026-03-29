@@ -115,6 +115,7 @@ struct Opt {
     trace: bool,
 
     /// Disable JIT compilation (run everything interpreted).
+    #[cfg(feature = "jit")]
     #[arg(long)]
     no_jit: bool,
 
@@ -557,6 +558,7 @@ fn main() -> Result<()> {
     context.strict(args.strict);
 
     // JIT
+    #[cfg(feature = "jit")]
     if args.no_jit {
         context.set_jit_enabled(false);
     }
