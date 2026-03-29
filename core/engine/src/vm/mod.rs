@@ -112,6 +112,10 @@ pub struct Vm {
     /// JIT compiler instance, created lazily on first use.
     #[cfg(feature = "jit")]
     pub(crate) jit_compiler: Option<jit::JitCompiler>,
+
+    /// Whether JIT compilation is enabled. Set to false via `--no-jit`.
+    #[cfg(feature = "jit")]
+    pub(crate) jit_enabled: bool,
 }
 
 /// The stack holds the [`JsValue`]s for the calling convention and registers.
@@ -365,6 +369,8 @@ impl Vm {
             current_frame: None,
             #[cfg(feature = "jit")]
             jit_compiler: None,
+            #[cfg(feature = "jit")]
+            jit_enabled: true,
         }
     }
 
@@ -947,6 +953,10 @@ impl Context {
     /// or `None` to fall back to the interpreter.
     #[cfg(feature = "jit")]
     fn try_run_jit(&mut self) -> Option<CompletionRecord> {
+        if !self.vm.jit_enabled {
+            return None;
+        }
+
         use code_block::JitState;
 
         let code = self.vm.frame().code_block.clone();

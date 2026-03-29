@@ -114,6 +114,10 @@ struct Opt {
     #[arg(long, short, conflicts_with = "graph")]
     trace: bool,
 
+    /// Disable JIT compilation (run everything interpreted).
+    #[arg(long)]
+    no_jit: bool,
+
     /// Use vi mode in the REPL
     #[arg(long = "vi")]
     vi_mode: bool,
@@ -551,6 +555,11 @@ fn main() -> Result<()> {
 
     // Strict mode
     context.strict(args.strict);
+
+    // JIT
+    if args.no_jit {
+        context.set_jit_enabled(false);
+    }
 
     // Add `console`.
     add_runtime(printer.clone(), context);
