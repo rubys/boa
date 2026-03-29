@@ -488,9 +488,14 @@ impl Context {
     }
 
     /// Enable or disable JIT compilation.
-    #[cfg(feature = "jit")]
-    pub fn set_jit_enabled(&mut self, enabled: bool) {
-        self.vm.jit_enabled = enabled;
+    /// Enable or disable JIT compilation.
+    ///
+    /// No-op if the JIT feature is not available.
+    pub fn set_jit_enabled(&mut self, _enabled: bool) {
+        #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
+        {
+            self.vm.jit_enabled = _enabled;
+        }
     }
 
     /// Enqueues a [`Job`] on the [`JobExecutor`].

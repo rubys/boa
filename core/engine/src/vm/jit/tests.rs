@@ -321,8 +321,7 @@ fn ic_fast_get_works_on_eval_objects() {
     // Test ic_fast_get.
     let offsets =
         helpers::IcOffsets::compute().expect("IC offsets should compute on this platform");
-    let result =
-        unsafe { helpers::ic_fast_get(raw_bits, cached_shape_ptr, slot_index as u32, &offsets) };
+    let result = unsafe { helpers::ic_fast_get(raw_bits, cached_shape_ptr, slot_index, &offsets) };
     assert!(
         result.is_some(),
         "IC fast path should hit for same-shape object"
@@ -496,7 +495,7 @@ fn op_store_int8() {
 fn op_store_int32() {
     assert_eq!(
         eval_num(&jit_call("function f() { return 100000; }", "f()")),
-        100000.0
+        100_000.0
     );
 }
 

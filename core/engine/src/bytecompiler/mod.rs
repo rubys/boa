@@ -2742,7 +2742,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             debug_id: CodeBlock::get_next_codeblock_id(),
             #[cfg(feature = "trace")]
             traced: Cell::new(false),
-            #[cfg(feature = "jit")]
+            #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
             jit: Cell::new(crate::vm::JitState::default()),
         }
     }

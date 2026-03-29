@@ -11,7 +11,7 @@ use crate::{
     object::JsObject,
 };
 
-#[cfg(feature = "jit")]
+#[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
 use super::jit;
 use bitflags::bitflags;
 use boa_ast::scope::{BindingLocator, Scope};
@@ -122,7 +122,7 @@ pub(crate) struct GlobalFunctionBinding {
 }
 
 /// JIT compilation state for a [`CodeBlock`].
-#[cfg(feature = "jit")]
+#[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum JitState {
     /// Not yet attempted. Tracks how many times the function has been called.
@@ -133,7 +133,7 @@ pub(crate) enum JitState {
     Compiled(jit::JitFn),
 }
 
-#[cfg(feature = "jit")]
+#[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
 impl Default for JitState {
     fn default() -> Self {
         Self::Pending { call_count: 0 }
@@ -197,7 +197,7 @@ pub struct CodeBlock {
 
     /// JIT compilation state. Tracks execution count and stores the compiled
     /// native function pointer once the function becomes hot.
-    #[cfg(feature = "jit")]
+    #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
     #[unsafe_ignore_trace]
     pub(crate) jit: Cell<JitState>,
 }
@@ -232,7 +232,7 @@ impl CodeBlock {
             debug_id: CodeBlock::get_next_codeblock_id(),
             #[cfg(feature = "trace")]
             traced: Cell::new(false),
-            #[cfg(feature = "jit")]
+            #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
             jit: Cell::new(JitState::default()),
         }
     }

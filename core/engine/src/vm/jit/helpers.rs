@@ -239,8 +239,8 @@ pub(super) fn verify_ic_offsets_and_fast_path() {
     let borrowed = obj.borrow();
 
     // Verify computed offsets match actual struct layout.
-    let shape_struct_ptr = &borrowed.properties().shape as *const _ as *const u8;
-    let storage_struct_ptr = &borrowed.properties().storage as *const _ as *const u8;
+    let shape_struct_ptr = std::ptr::from_ref(&borrowed.properties().shape).cast::<u8>();
+    let storage_struct_ptr = std::ptr::from_ref(&borrowed.properties().storage).cast::<u8>();
     let actual_shape_offset = unsafe { shape_struct_ptr.offset_from(gc_ptr) };
     let actual_storage_offset = unsafe { storage_struct_ptr.offset_from(gc_ptr) };
     assert_eq!(

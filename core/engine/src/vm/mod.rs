@@ -45,7 +45,7 @@ pub use {
 
 pub(crate) use code_block::GlobalFunctionBinding;
 
-#[cfg(feature = "jit")]
+#[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
 pub(crate) use code_block::JitState;
 
 mod call_frame;
@@ -61,7 +61,7 @@ pub(crate) mod source_info;
 #[cfg(feature = "flowgraph")]
 pub mod flowgraph;
 
-#[cfg(feature = "jit")]
+#[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
 pub(crate) mod jit;
 
 #[cfg(test)]
@@ -110,11 +110,11 @@ pub struct Vm {
     pub(crate) current_frame: Option<*const CallFrame>,
 
     /// JIT compiler instance, created lazily on first use.
-    #[cfg(feature = "jit")]
+    #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
     pub(crate) jit_compiler: Option<jit::JitCompiler>,
 
     /// Whether JIT compilation is enabled. Set to false via `--no-jit`.
-    #[cfg(feature = "jit")]
+    #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
     pub(crate) jit_enabled: bool,
 }
 
@@ -367,9 +367,9 @@ impl Vm {
             trace: false,
             #[cfg(feature = "trace")]
             current_frame: None,
-            #[cfg(feature = "jit")]
+            #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
             jit_compiler: None,
-            #[cfg(feature = "jit")]
+            #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
             jit_enabled: true,
         }
     }
@@ -884,7 +884,7 @@ impl Context {
     #[allow(clippy::future_not_send)]
     pub(crate) async fn run_async_with_budget(&mut self, budget: u32) -> CompletionRecord {
         // JIT: try to run the current frame's code block as native code.
-        #[cfg(feature = "jit")]
+        #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
         if let Some(record) = self.try_run_jit() {
             match record {
                 CompletionRecord::Normal(_) => {}
@@ -905,7 +905,7 @@ impl Context {
 
         loop {
             // JIT: when at pc==0 we've just entered a new frame.
-            #[cfg(feature = "jit")]
+            #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
             if self.vm.frame().pc == 0
                 && let Some(record) = self.try_run_jit()
             {
@@ -956,14 +956,14 @@ impl Context {
     }
 
     /// Number of calls before a function becomes eligible for JIT compilation.
-    #[cfg(feature = "jit")]
+    #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
     const JIT_THRESHOLD: u32 = 10;
 
     /// Try to execute the current frame via JIT-compiled code.
     ///
     /// Returns `Some(record)` if the function was JIT'd and executed,
     /// or `None` to fall back to the interpreter.
-    #[cfg(feature = "jit")]
+    #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
     #[allow(clippy::items_after_statements)]
     #[allow(clippy::items_after_statements)]
     fn try_run_jit(&mut self) -> Option<CompletionRecord> {
@@ -1024,7 +1024,7 @@ impl Context {
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
         // JIT: try to run the current frame's code block as native code.
-        #[cfg(feature = "jit")]
+        #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
         if let Some(record) = self.try_run_jit() {
             match record {
                 CompletionRecord::Normal(_) => {}
@@ -1044,7 +1044,7 @@ impl Context {
         loop {
             // JIT: when at pc==0 we've just entered a new frame. Check if it
             // should be JIT-compiled or already is.
-            #[cfg(feature = "jit")]
+            #[cfg(all(feature = "jit", not(feature = "jsvalue-enum")))]
             if self.vm.frame().pc == 0
                 && let Some(record) = self.try_run_jit()
             {
