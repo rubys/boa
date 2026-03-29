@@ -487,6 +487,12 @@ impl Context {
         self.strict = strict;
     }
 
+    /// Enable or disable JIT compilation.
+    #[cfg(feature = "jit")]
+    pub fn set_jit_enabled(&mut self, enabled: bool) {
+        self.vm.jit_enabled = enabled;
+    }
+
     /// Enqueues a [`Job`] on the [`JobExecutor`].
     #[inline]
     pub fn enqueue_job(&mut self, job: Job) {
