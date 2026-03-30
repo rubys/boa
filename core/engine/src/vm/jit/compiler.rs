@@ -590,12 +590,20 @@ impl JitCompiler {
             let reg_base_var = builder.declare_var(self.ptr_type);
             builder.def_var(reg_base_var, reg_base_arg);
 
+            // Run bytecode optimization passes before Cranelift lowering.
+            let optimized = super::optimize::optimize(&code.bytecode);
+            let opt_bytecode = crate::vm::opcode::Bytecode {
+                bytes: optimized.bytes.into_boxed_slice(),
+            };
+
             self.translate_body(
                 &mut builder,
                 ctx_ptr,
                 reg_base_var,
                 reg_base_slot,
                 code,
+                &opt_bytecode,
+                &optimized.type_map,
                 entry_block,
             );
 
@@ -707,32 +715,38 @@ impl JitCompiler {
         op: IntBinOp,
         slow_ref: cranelift_codegen::ir::FuncRef,
         error_block: Block,
+        known_int: bool,
     ) {
         let lhs_val = Self::load_reg(builder, reg_base, lhs);
         let rhs_val = Self::load_reg(builder, reg_base, rhs);
 
-        let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
         let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-        let lhs_tag = builder.ins().band(lhs_val, mask);
-        let rhs_tag = builder.ins().band(rhs_val, mask);
-        let lhs_is_int = builder.ins().icmp(
-            cranelift_codegen::ir::condcodes::IntCC::Equal,
-            lhs_tag,
-            int_tag,
-        );
-        let rhs_is_int = builder.ins().icmp(
-            cranelift_codegen::ir::condcodes::IntCC::Equal,
-            rhs_tag,
-            int_tag,
-        );
-        let both_int = builder.ins().band(lhs_is_int, rhs_is_int);
 
         let fast_block = builder.create_block();
         let slow_block = builder.create_block();
         let merge_block = builder.create_block();
-        builder
-            .ins()
-            .brif(both_int, fast_block, &[], slow_block, &[]);
+
+        if known_int {
+            builder.ins().jump(fast_block, &[]);
+        } else {
+            let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+            let lhs_tag = builder.ins().band(lhs_val, mask);
+            let rhs_tag = builder.ins().band(rhs_val, mask);
+            let lhs_is_int = builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::Equal,
+                lhs_tag,
+                int_tag,
+            );
+            let rhs_is_int = builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::Equal,
+                rhs_tag,
+                int_tag,
+            );
+            let both_int = builder.ins().band(lhs_is_int, rhs_is_int);
+            builder
+                .ins()
+                .brif(both_int, fast_block, &[], slow_block, &[]);
+        }
 
         builder.switch_to_block(fast_block);
         let lhs_i32 = builder.ins().ireduce(types::I32, lhs_val);
@@ -862,36 +876,43 @@ impl JitCompiler {
         rhs: u32,
         add_ref: cranelift_codegen::ir::FuncRef,
         error_block: Block,
+        known_int: bool,
     ) {
         // Load raw u64 values from registers.
         let lhs_val = Self::load_reg(builder, reg_base, lhs);
         let rhs_val = Self::load_reg(builder, reg_base, rhs);
 
-        // Check both are Integer32: (val & MASK_KIND) == MASK_INT32
-        let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
         let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-
-        let lhs_tag = builder.ins().band(lhs_val, mask);
-        let rhs_tag = builder.ins().band(rhs_val, mask);
-        let lhs_is_int = builder.ins().icmp(
-            cranelift_codegen::ir::condcodes::IntCC::Equal,
-            lhs_tag,
-            int_tag,
-        );
-        let rhs_is_int = builder.ins().icmp(
-            cranelift_codegen::ir::condcodes::IntCC::Equal,
-            rhs_tag,
-            int_tag,
-        );
-        let both_int = builder.ins().band(lhs_is_int, rhs_is_int);
 
         let fast_block = builder.create_block();
         let slow_block = builder.create_block();
         let merge_block = builder.create_block();
 
-        builder
-            .ins()
-            .brif(both_int, fast_block, &[], slow_block, &[]);
+        if known_int {
+            // Type propagation guarantees both inputs are Int32 — skip tag checks.
+            builder.ins().jump(fast_block, &[]);
+        } else {
+            // Check both are Integer32: (val & MASK_KIND) == MASK_INT32
+            let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
+
+            let lhs_tag = builder.ins().band(lhs_val, mask);
+            let rhs_tag = builder.ins().band(rhs_val, mask);
+            let lhs_is_int = builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::Equal,
+                lhs_tag,
+                int_tag,
+            );
+            let rhs_is_int = builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::Equal,
+                rhs_tag,
+                int_tag,
+            );
+            let both_int = builder.ins().band(lhs_is_int, rhs_is_int);
+
+            builder
+                .ins()
+                .brif(both_int, fast_block, &[], slow_block, &[]);
+        }
 
         // Fast path: extract i32, add with overflow check, tag result.
         builder.switch_to_block(fast_block);
@@ -949,6 +970,8 @@ impl JitCompiler {
         reg_base_var: cranelift_frontend::Variable,
         reg_base_slot: cranelift_codegen::ir::StackSlot,
         code: &CodeBlock,
+        bytecode: &crate::vm::opcode::Bytecode,
+        type_map: &std::collections::HashMap<u32, super::optimize::ValueType>,
         _entry_block: Block,
     ) {
         // Import all helper function references eagerly.
@@ -1049,7 +1072,7 @@ impl JitCompiler {
         // Phase 1: Pre-scan bytecode to find jump targets and create blocks.
         let mut block_map: HashMap<u32, Block> = HashMap::new();
         {
-            let iter = InstructionIterator::new(&code.bytecode);
+            let iter = InstructionIterator::new(bytecode);
             for (_pc, _opcode, instruction) in iter {
                 let addr = match &instruction {
                     Instruction::Jump { address }
@@ -1085,7 +1108,7 @@ impl JitCompiler {
 
         // Phase 2: Emit code. When we reach a PC that's a jump target,
         // transition to its block.
-        let iter = InstructionIterator::new(&code.bytecode);
+        let iter = InstructionIterator::new(bytecode);
         let mut terminated = false;
 
         for (pc, _opcode, instruction) in iter {
@@ -1357,6 +1380,9 @@ impl JitCompiler {
                 }
                 // SetRegisterFromAccumulator is handled below (near other register ops)
                 Instruction::Add { dst, lhs, rhs } => {
+                    let known_int = type_map
+                        .get(&(pc as u32))
+                        .is_some_and(|t| *t == super::optimize::ValueType::Int32);
                     Self::emit_inlined_add(
                         builder,
                         ctx_ptr,
@@ -1368,9 +1394,13 @@ impl JitCompiler {
                         u32::from(rhs),
                         add_ref,
                         error_block,
+                        known_int,
                     );
                 }
                 Instruction::Sub { dst, lhs, rhs } => {
+                    let known_int = type_map
+                        .get(&(pc as u32))
+                        .is_some_and(|t| *t == super::optimize::ValueType::Int32);
                     self.emit_inlined_int_binop(
                         builder,
                         ctx_ptr,
@@ -1383,9 +1413,13 @@ impl JitCompiler {
                         IntBinOp::Sub,
                         sub_ref,
                         error_block,
+                        known_int,
                     );
                 }
                 Instruction::Mul { dst, lhs, rhs } => {
+                    let known_int = type_map
+                        .get(&(pc as u32))
+                        .is_some_and(|t| *t == super::optimize::ValueType::Int32);
                     self.emit_inlined_int_binop(
                         builder,
                         ctx_ptr,
@@ -1398,6 +1432,7 @@ impl JitCompiler {
                         IntBinOp::Mul,
                         mul_ref,
                         error_block,
+                        known_int,
                     );
                 }
                 Instruction::Div { dst, lhs, rhs } => {
