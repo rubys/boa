@@ -2383,19 +2383,29 @@ impl LoweringContext<'_, '_> {
             use crate::object::shape::slot::SlotAttributes;
             let shape = e.shape.upgrade()?;
             if e.slot.attributes.contains(SlotAttributes::NOT_CACHEABLE)
-                || e.slot.attributes.contains(SlotAttributes::PROTOTYPE)
                 || e.slot.attributes.has_get()
             {
                 return None;
             }
-            // Compute the raw GcBox pointer from to_addr_usize.
             let addr = shape.to_addr_usize();
             let raw_gc_ptr = addr - helpers::gcbox_value_offset();
-            Some((raw_gc_ptr as u64, e.slot.index))
+
+            if e.slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+                // Prototype property: get the prototype's raw inner data pointer
+                // by converting to JsValue (NaN-boxed) and stripping the tag.
+                let prototype = shape.prototype()?;
+                let proto_val: crate::JsValue = prototype.into();
+                let proto_nan_boxed: u64 =
+                    unsafe { std::mem::transmute::<crate::JsValue, u64>(proto_val) };
+                let proto_inner_ptr = proto_nan_boxed & 0x0000_FFFF_FFFF_FFFF;
+                Some((raw_gc_ptr as u64, e.slot.index, Some(proto_inner_ptr)))
+            } else {
+                Some((raw_gc_ptr as u64, e.slot.index, None))
+            }
         });
         drop(cached);
 
-        if let Some((cached_shape_ptr, slot_idx)) = ic_data {
+        if let Some((cached_shape_ptr, slot_idx, proto_ptr)) = ic_data {
             let reg_base = self.builder.use_var(self.reg_base_var);
             let obj_val = JitCompiler::load_reg(self.builder, reg_base, value);
 
@@ -2453,11 +2463,19 @@ impl LoweringContext<'_, '_> {
                 .brif(shape_match, fast_block, &[], slow_block, &[]);
 
             // IC hit! Load from storage[slot_idx].
+            // For prototype properties, load from the cached prototype object.
             self.builder.switch_to_block(fast_block);
+            let storage_owner = if let Some(proto_raw) = proto_ptr {
+                // Prototype property: use the baked-in prototype pointer.
+                self.builder.ins().iconst(types::I64, proto_raw as i64)
+            } else {
+                // Own property: use the object itself.
+                obj_ptr
+            };
             let storage_data = self.builder.ins().load(
                 types::I64,
                 cranelift_codegen::ir::MemFlags::trusted(),
-                obj_ptr,
+                storage_owner,
                 self.ic_offsets.storage_ptr,
             );
             let slot_off = (slot_idx as i32) * 8;
