@@ -2175,3 +2175,12 @@ pub(super) extern "C" fn jit_set_register_from_accumulator(ctx: &mut Context, ds
     let val = ctx.vm.get_return_value();
     ctx.vm.set_register(dst as usize, val);
 }
+
+/// Return the global object as a NaN-boxed u64 pointer.
+/// Used by the JIT to inline `GetNameGlobal` IC checks.
+pub(super) extern "C" fn jit_get_global_object(ctx: &mut Context) -> u64 {
+    let global = ctx.global_object();
+    let js_val: JsValue = global.into();
+    // SAFETY: JsValue is a NaN-boxed u64 in memory.
+    unsafe { std::mem::transmute::<JsValue, u64>(js_val) }
+}

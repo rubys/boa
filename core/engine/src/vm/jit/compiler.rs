@@ -245,6 +245,7 @@ struct HelperRefs {
     inc_loop_ref: cranelift_codegen::ir::FuncRef,
     not_lt_ref: cranelift_codegen::ir::FuncRef,
     ret_ref: cranelift_codegen::ir::FuncRef,
+    get_global_obj_ref: cranelift_codegen::ir::FuncRef,
 }
 
 /// Shared context for lowering individual instructions to Cranelift IR.
@@ -2074,18 +2075,166 @@ impl LoweringContext<'_, '_> {
     }
 
     fn lower_get_name_global(&mut self, dst: u32, binding_index: u32, ic_index: u32) {
-        let d = self.i32const(dst);
-        let b = self.i32const(binding_index);
-        let ic = self.i32const(ic_index);
-        JitCompiler::emit_fallible_call(
-            self.builder,
-            self.refs.get_name_global_ref,
-            &[self.ctx_ptr, d, b, ic],
-            self.error_block,
-            self.reg_base_var,
-            self.reg_base_slot,
-            self.ptr_type,
-        );
+        // Try inline IC: check the global object's shape at runtime,
+        // load the property directly from storage on match.
+        let ic_idx = ic_index as usize;
+        let ic_entry = &self.code.ic[ic_idx];
+        let cached = ic_entry.entries.borrow();
+        let ic_data = cached.first().and_then(|e| {
+            use crate::object::shape::slot::SlotAttributes;
+            let shape = e.shape.upgrade()?;
+            if e.slot.attributes.contains(SlotAttributes::NOT_CACHEABLE)
+                || e.slot.attributes.contains(SlotAttributes::PROTOTYPE)
+                || e.slot.attributes.has_get()
+            {
+                return None;
+            }
+            let addr = shape.to_addr_usize();
+            let raw_gc_ptr = addr - helpers::gcbox_value_offset();
+            Some((raw_gc_ptr as u64, e.slot.index))
+        });
+        drop(cached);
+
+        if let Some((cached_shape_ptr, slot_idx)) = ic_data {
+            // Get the global object at runtime (one helper call).
+            let global_val = {
+                let result = self
+                    .builder
+                    .ins()
+                    .call(self.refs.get_global_obj_ref, &[self.ctx_ptr]);
+                self.builder.inst_results(result)[0]
+            };
+
+            // Extract raw pointer from NaN-boxed value.
+            let ptr_mask = self
+                .builder
+                .ins()
+                .iconst(types::I64, 0x0000_FFFF_FFFF_FFFF_u64 as i64);
+            let obj_ptr = self.builder.ins().band(global_val, ptr_mask);
+
+            // Check shape.
+            let shape_val = self.builder.ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlags::trusted(),
+                obj_ptr,
+                self.ic_offsets.shape_ptr,
+            );
+            let cached = self
+                .builder
+                .ins()
+                .iconst(types::I64, cached_shape_ptr as i64);
+            let shape_match = self.builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::Equal,
+                shape_val,
+                cached,
+            );
+
+            let fast_block = self.builder.create_block();
+            let slow_block = self.builder.create_block();
+            let merge_block = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(shape_match, fast_block, &[], slow_block, &[]);
+
+            // IC hit: load from storage[slot_idx].
+            self.builder.switch_to_block(fast_block);
+            let storage_data = self.builder.ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlags::trusted(),
+                obj_ptr,
+                self.ic_offsets.storage_ptr,
+            );
+            let slot_off = (slot_idx as i32) * 8;
+            let prop_val = self.builder.ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlags::trusted(),
+                storage_data,
+                slot_off,
+            );
+
+            // GC: clone if pointer type.
+            let mask_k = self
+                .builder
+                .ins()
+                .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+            let ptr_thresh = self
+                .builder
+                .ins()
+                .iconst(types::I64, JitCompiler::MASK_OBJECT as i64);
+            let new_tag = self.builder.ins().band(prop_val, mask_k);
+            let new_is_ptr = self.builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                new_tag,
+                ptr_thresh,
+            );
+            let clone_blk = self.builder.create_block();
+            let after_clone = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(new_is_ptr, clone_blk, &[], after_clone, &[]);
+
+            self.builder.switch_to_block(clone_blk);
+            self.builder
+                .ins()
+                .call(self.refs.clone_val_ref, &[prop_val]);
+            self.builder.ins().jump(after_clone, &[]);
+
+            // Drop old dst if pointer type.
+            self.builder.switch_to_block(after_clone);
+            let reg_base = self.builder.use_var(self.reg_base_var);
+            let old_dst = JitCompiler::load_reg(self.builder, reg_base, dst);
+            let old_tag = self.builder.ins().band(old_dst, mask_k);
+            let old_is_ptr = self.builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                old_tag,
+                ptr_thresh,
+            );
+            let drop_blk = self.builder.create_block();
+            let after_drop = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(old_is_ptr, drop_blk, &[], after_drop, &[]);
+
+            self.builder.switch_to_block(drop_blk);
+            self.builder.ins().call(self.refs.drop_val_ref, &[old_dst]);
+            self.builder.ins().jump(after_drop, &[]);
+
+            self.builder.switch_to_block(after_drop);
+            JitCompiler::store_reg(self.builder, reg_base, dst, prop_val);
+            self.builder.ins().jump(merge_block, &[]);
+
+            // Slow path: call the helper.
+            self.builder.switch_to_block(slow_block);
+            let d = self.i32const(dst);
+            let b = self.i32const(binding_index);
+            let ic = self.i32const(ic_index);
+            JitCompiler::emit_fallible_call(
+                self.builder,
+                self.refs.get_name_global_ref,
+                &[self.ctx_ptr, d, b, ic],
+                self.error_block,
+                self.reg_base_var,
+                self.reg_base_slot,
+                self.ptr_type,
+            );
+            self.builder.ins().jump(merge_block, &[]);
+
+            self.builder.switch_to_block(merge_block);
+        } else {
+            // No IC data — call the helper.
+            let d = self.i32const(dst);
+            let b = self.i32const(binding_index);
+            let ic = self.i32const(ic_index);
+            JitCompiler::emit_fallible_call(
+                self.builder,
+                self.refs.get_name_global_ref,
+                &[self.ctx_ptr, d, b, ic],
+                self.error_block,
+                self.reg_base_var,
+                self.reg_base_slot,
+                self.ptr_type,
+            );
+        }
     }
 
     fn lower_get_name_or_undefined(&mut self, dst: u32, binding_index: u32) {
@@ -3600,6 +3749,10 @@ impl JitCompiler {
                 "jit_check_return_and_return",
                 helpers::jit_check_return_and_return as *const u8,
             ),
+            (
+                "jit_get_global_object",
+                helpers::jit_get_global_object as *const u8,
+            ),
         ];
         for &(name, ptr) in syms {
             builder.symbol(name, ptr);
@@ -3713,6 +3866,7 @@ impl JitCompiler {
             // jit_call and jit_new are declared separately (special signature with ptr param)
             ("jit_not_less_than", 2, true),
             ("jit_check_return_and_return", 0, true),
+            ("jit_get_global_object", 0, true),
         ];
 
         let mut funcs = HashMap::new();
@@ -4295,6 +4449,7 @@ impl JitCompiler {
             inc_loop_ref => "jit_increment_loop_iteration",
             not_lt_ref => "jit_not_less_than",
             ret_ref => "jit_check_return_and_return",
+            get_global_obj_ref => "jit_get_global_object",
         }
 
         // Error block: returns error tag (2) to signal exception to caller.
@@ -4415,6 +4570,7 @@ impl JitCompiler {
             inc_loop_ref,
             not_lt_ref,
             ret_ref,
+            get_global_obj_ref,
         };
 
         // Build LoweringContext.
@@ -5087,6 +5243,7 @@ impl JitCompiler {
             inc_loop_ref => "jit_increment_loop_iteration",
             not_lt_ref => "jit_not_less_than",
             ret_ref => "jit_check_return_and_return",
+            get_global_obj_ref => "jit_get_global_object",
         }
 
         let error_block = builder.create_block();
@@ -5184,6 +5341,7 @@ impl JitCompiler {
             inc_loop_ref,
             not_lt_ref,
             ret_ref,
+            get_global_obj_ref,
         };
 
         let mut lctx = LoweringContext {
