@@ -256,7 +256,7 @@ struct LoweringContext<'a, 'b> {
     error_block: Block,
     block_map: &'a HashMap<u32, Block>,
     ptr_type: Type,
-    type_map: &'a HashMap<u32, super::optimize::ValueType>,
+    type_map: &'a HashMap<u32, super::ir::ValueType>,
     code: &'a CodeBlock,
     ic_offsets: &'a helpers::IcOffsets,
     refs: HelperRefs,
@@ -467,7 +467,7 @@ impl LoweringContext<'_, '_> {
         let known_int = self
             .type_map
             .get(&(pc as u32))
-            .is_some_and(|t| *t == super::optimize::ValueType::Int32);
+            .is_some_and(|t| *t == super::ir::ValueType::Int32);
         JitCompiler::emit_inlined_add(
             self.builder,
             self.ctx_ptr,
@@ -495,7 +495,7 @@ impl LoweringContext<'_, '_> {
         let known_int = self
             .type_map
             .get(&(pc as u32))
-            .is_some_and(|t| *t == super::optimize::ValueType::Int32);
+            .is_some_and(|t| *t == super::ir::ValueType::Int32);
         compiler.emit_inlined_int_binop(
             self.builder,
             self.ctx_ptr,
@@ -524,7 +524,7 @@ impl LoweringContext<'_, '_> {
         let known_int = self
             .type_map
             .get(&(pc as u32))
-            .is_some_and(|t| *t == super::optimize::ValueType::Int32);
+            .is_some_and(|t| *t == super::ir::ValueType::Int32);
         compiler.emit_inlined_int_binop(
             self.builder,
             self.ctx_ptr,
@@ -3822,11 +3822,10 @@ impl JitCompiler {
             let reg_base_var = builder.declare_var(self.ptr_type);
             builder.def_var(reg_base_var, reg_base_arg);
 
-            // Run bytecode optimization passes before Cranelift lowering.
-            let optimized = super::optimize::optimize(&code.bytecode);
-            let opt_bytecode = crate::vm::opcode::Bytecode {
-                bytes: optimized.bytes.into_boxed_slice(),
-            };
+            // Build IR from bytecode, run optimization passes, then lower.
+            let mut ir = super::ir::build_ir(&code.bytecode);
+            super::optimize::optimize(&mut ir);
+            let type_map = super::optimize::build_type_map(&ir);
 
             self.translate_body_ir(
                 &mut builder,
@@ -3834,8 +3833,8 @@ impl JitCompiler {
                 reg_base_var,
                 reg_base_slot,
                 code,
-                &opt_bytecode,
-                &optimized.type_map,
+                &ir,
+                &type_map,
                 entry_block,
             );
 
@@ -4203,7 +4202,7 @@ impl JitCompiler {
         reg_base_slot: cranelift_codegen::ir::StackSlot,
         code: &CodeBlock,
         bytecode: &crate::vm::opcode::Bytecode,
-        type_map: &HashMap<u32, super::optimize::ValueType>,
+        type_map: &HashMap<u32, super::ir::ValueType>,
         _entry_block: Block,
     ) {
         // Import all helper function references eagerly.
@@ -4994,8 +4993,8 @@ impl JitCompiler {
         reg_base_var: cranelift_frontend::Variable,
         reg_base_slot: cranelift_codegen::ir::StackSlot,
         code: &CodeBlock,
-        bytecode: &crate::vm::opcode::Bytecode,
-        type_map: &HashMap<u32, super::optimize::ValueType>,
+        ir: &super::ir::IrFunction,
+        type_map: &HashMap<u32, super::ir::ValueType>,
         _entry_block: Block,
     ) {
         // Import helper function references.
@@ -5093,8 +5092,6 @@ impl JitCompiler {
         let error_block = builder.create_block();
 
         // Build IR from bytecode.
-        let ir = super::ir::build_ir(bytecode);
-
         // Create Cranelift blocks for each IR block, keyed by start_pc.
         let mut block_map: HashMap<u32, Block> = HashMap::new();
         for ir_block in &ir.blocks {
@@ -5219,7 +5216,8 @@ impl JitCompiler {
 
             // Lower body instructions.
             let mut terminated = false;
-            for &(pc, ref instruction) in &ir_block.body {
+            for ir_inst in &ir_block.body {
+                let (pc, instruction) = (ir_inst.pc, &ir_inst.instruction);
                 if terminated {
                     break;
                 }

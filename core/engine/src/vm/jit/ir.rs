@@ -14,12 +14,32 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct BlockId(pub usize);
 
+/// Known value type produced by an instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ValueType {
+    /// No type information — emit full NaN-boxing guards.
+    Unknown,
+    /// Known 32-bit integer.
+    Int32,
+    /// Known 64-bit float.
+    Float64,
+    /// Known boolean.
+    Boolean,
+}
+
+/// An instruction in the IR: bytecode PC, the instruction, and its known output type.
+pub(super) struct IrInst {
+    pub pc: u32,
+    pub instruction: Instruction,
+    pub ty: ValueType,
+}
+
 /// A basic block: a sequence of non-branching instructions followed by a terminator.
 pub(super) struct BasicBlock {
     /// The bytecode PC where this block starts.
     pub start_pc: u32,
-    /// Non-terminator instructions with their PCs.
-    pub body: Vec<(u32, Instruction)>,
+    /// Non-terminator instructions with their PCs and type annotations.
+    pub body: Vec<IrInst>,
     /// How this block ends.
     pub terminator: Terminator,
 }
@@ -56,7 +76,7 @@ pub(super) fn build_ir(bytecode: &crate::vm::opcode::Bytecode) -> IrFunction {
 
     // Phase 2: Build blocks.
     let mut blocks: Vec<BasicBlock> = Vec::new();
-    let mut body: Vec<(u32, Instruction)> = Vec::new();
+    let mut body: Vec<IrInst> = Vec::new();
     let mut block_start_pc: u32 = 0;
 
     let iter = InstructionIterator::new(bytecode);
@@ -88,7 +108,11 @@ pub(super) fn build_ir(bytecode: &crate::vm::opcode::Bytecode) -> IrFunction {
             continue;
         }
 
-        body.push((pc, instruction));
+        body.push(IrInst {
+            pc,
+            instruction,
+            ty: ValueType::Unknown,
+        });
     }
 
     // Close the last block if there are remaining instructions.
