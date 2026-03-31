@@ -18,6 +18,7 @@ mod compiler;
 pub(crate) mod helpers;
 #[cfg(not(feature = "jit-stats"))]
 mod helpers;
+mod ir;
 mod optimize;
 
 #[cfg(test)]

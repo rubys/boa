@@ -2983,6 +2983,413 @@ impl LoweringContext<'_, '_> {
         self.builder.ins().return_(&[tag]);
         true
     }
+
+    /// Lower a single instruction. Returns `true` if the instruction terminates the block.
+    #[allow(clippy::too_many_lines)]
+    fn lower_instruction(
+        &mut self,
+        pc: usize,
+        instruction: &Instruction,
+        reg_base: Value,
+        compiler: &JitCompiler,
+    ) -> bool {
+        match instruction {
+            Instruction::StoreZero { dst } => self.lower_store_zero(reg_base, u32::from(*dst)),
+            Instruction::StoreOne { dst } => self.lower_store_one(reg_base, u32::from(*dst)),
+            Instruction::StoreInt8 { dst, value } => {
+                self.lower_store_int8(reg_base, u32::from(*dst), *value)
+            }
+            Instruction::StoreInt16 { dst, value } => {
+                self.lower_store_int16(reg_base, u32::from(*dst), *value)
+            }
+            Instruction::StoreInt32 { dst, value } => {
+                self.lower_store_int32(reg_base, u32::from(*dst), *value)
+            }
+            Instruction::StoreFloat { dst, value } => {
+                self.lower_store_float(reg_base, u32::from(*dst), *value)
+            }
+            Instruction::StoreDouble { dst, value } => {
+                self.lower_store_double(reg_base, u32::from(*dst), *value)
+            }
+            Instruction::StoreNan { dst } => self.lower_store_nan(reg_base, u32::from(*dst)),
+            Instruction::StorePositiveInfinity { dst } => {
+                self.lower_store_positive_infinity(reg_base, u32::from(*dst))
+            }
+            Instruction::StoreNegativeInfinity { dst } => {
+                self.lower_store_negative_infinity(reg_base, u32::from(*dst))
+            }
+            Instruction::StoreNull { dst } => self.lower_store_null(reg_base, u32::from(*dst)),
+            Instruction::StoreTrue { dst } => self.lower_store_true(reg_base, u32::from(*dst)),
+            Instruction::StoreFalse { dst } => self.lower_store_false(reg_base, u32::from(*dst)),
+            Instruction::StoreUndefined { dst } => {
+                self.lower_store_undefined(reg_base, u32::from(*dst))
+            }
+            Instruction::This { dst } => self.lower_this(u32::from(*dst)),
+            Instruction::GetArgument { index, dst } => {
+                self.lower_get_argument(u32::from(*index), u32::from(*dst))
+            }
+            Instruction::Move { dst, src } => {
+                self.lower_move(reg_base, u32::from(*dst), u32::from(*src))
+            }
+            Instruction::SetAccumulator { src } => self.lower_set_accumulator(u32::from(*src)),
+            Instruction::PushFromRegister { src } => self.lower_push_from_register(u32::from(*src)),
+            Instruction::PopIntoRegister { dst } => self.lower_pop_into_register(u32::from(*dst)),
+            Instruction::Pop => self.lower_pop(),
+            Instruction::Add { dst, lhs, rhs } => self.lower_add(
+                reg_base,
+                pc,
+                u32::from(*dst),
+                u32::from(*lhs),
+                u32::from(*rhs),
+            ),
+            Instruction::Sub { dst, lhs, rhs } => self.lower_sub(
+                compiler,
+                reg_base,
+                pc,
+                u32::from(*dst),
+                u32::from(*lhs),
+                u32::from(*rhs),
+            ),
+            Instruction::Mul { dst, lhs, rhs } => self.lower_mul(
+                compiler,
+                reg_base,
+                pc,
+                u32::from(*dst),
+                u32::from(*lhs),
+                u32::from(*rhs),
+            ),
+            Instruction::Div { dst, lhs, rhs } => {
+                self.lower_div(u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::Mod { dst, lhs, rhs } => {
+                self.lower_mod(reg_base, u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::Pow { dst, lhs, rhs } => {
+                self.lower_pow(u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::Neg { value } => self.lower_neg(u32::from(*value)),
+            Instruction::Pos { value } => self.lower_pos(u32::from(*value)),
+            Instruction::Inc { dst, src } => {
+                self.lower_inc(reg_base, u32::from(*dst), u32::from(*src))
+            }
+            Instruction::Dec { dst, src } => {
+                self.lower_dec(reg_base, u32::from(*dst), u32::from(*src))
+            }
+            Instruction::BitOr { dst, lhs, rhs } => {
+                self.lower_bit_or(reg_base, u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::BitAnd { dst, lhs, rhs } => self.lower_bit_and(
+                compiler,
+                reg_base,
+                u32::from(*dst),
+                u32::from(*lhs),
+                u32::from(*rhs),
+            ),
+            Instruction::BitXor { dst, lhs, rhs } => self.lower_bit_xor(
+                compiler,
+                reg_base,
+                u32::from(*dst),
+                u32::from(*lhs),
+                u32::from(*rhs),
+            ),
+            Instruction::BitNot { value } => self.lower_bit_not(u32::from(*value)),
+            Instruction::ShiftLeft { dst, lhs, rhs } => {
+                self.lower_shift_left(u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::ShiftRight { dst, lhs, rhs } => {
+                self.lower_shift_right(u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::UnsignedShiftRight { dst, lhs, rhs } => {
+                self.lower_unsigned_shift_right(u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::StrictEq { dst, lhs, rhs } => {
+                self.lower_strict_eq(reg_base, u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::StrictNotEq { dst, lhs, rhs } => self.lower_strict_not_eq(
+                reg_base,
+                u32::from(*dst),
+                u32::from(*lhs),
+                u32::from(*rhs),
+            ),
+            Instruction::Eq { dst, lhs, rhs } => {
+                self.lower_eq(u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::NotEq { dst, lhs, rhs } => {
+                self.lower_not_eq(u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::GreaterThan { dst, lhs, rhs } => {
+                self.lower_greater_than(u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::GreaterThanOrEq { dst, lhs, rhs } => {
+                self.lower_greater_than_or_eq(u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::LessThan { dst, lhs, rhs } => {
+                self.lower_less_than(u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::LessThanOrEq { dst, lhs, rhs } => {
+                self.lower_less_than_or_eq(u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::InstanceOf { dst, lhs, rhs } => {
+                self.lower_instance_of(u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::TypeOf { value } => self.lower_type_of(u32::from(*value)),
+            Instruction::IsObject { value } => self.lower_is_object(u32::from(*value)),
+            Instruction::ValueNotNullOrUndefined { src } => {
+                self.lower_value_not_null_or_undefined(u32::from(*src))
+            }
+            Instruction::LogicalNot { value } => self.lower_logical_not(u32::from(*value)),
+            Instruction::Jump { address } => {
+                self.lower_jump(address.as_u32());
+                return true;
+            }
+            Instruction::JumpIfTrue { address, value } => {
+                self.lower_jump_if_true(reg_base, address.as_u32(), u32::from(*value))
+            }
+            Instruction::JumpIfFalse { address, value } => {
+                self.lower_jump_if_false(reg_base, address.as_u32(), u32::from(*value))
+            }
+            Instruction::JumpIfNotLessThan { lhs, rhs, address } => self
+                .lower_jump_if_not_less_than(
+                    reg_base,
+                    u32::from(*lhs),
+                    u32::from(*rhs),
+                    address.as_u32(),
+                ),
+            Instruction::JumpIfNotLessThanOrEqual { lhs, rhs, address } => self
+                .lower_jump_if_not_less_than_or_equal(
+                    u32::from(*lhs),
+                    u32::from(*rhs),
+                    address.as_u32(),
+                ),
+            Instruction::JumpIfNotGreaterThan { lhs, rhs, address } => self
+                .lower_jump_if_not_greater_than(u32::from(*lhs), u32::from(*rhs), address.as_u32()),
+            Instruction::JumpIfNotGreaterThanOrEqual { lhs, rhs, address } => self
+                .lower_jump_if_not_greater_than_or_equal(
+                    u32::from(*lhs),
+                    u32::from(*rhs),
+                    address.as_u32(),
+                ),
+            Instruction::JumpIfNotEqual { lhs, rhs, address } => {
+                self.lower_jump_if_not_equal(u32::from(*lhs), u32::from(*rhs), address.as_u32())
+            }
+            Instruction::JumpIfNullOrUndefined { address, value } => {
+                self.lower_jump_if_null_or_undefined(address.as_u32(), u32::from(*value))
+            }
+            Instruction::JumpIfNotUndefined { address, value } => {
+                self.lower_jump_if_not_undefined(address.as_u32(), u32::from(*value))
+            }
+            Instruction::Case {
+                address,
+                value,
+                condition,
+            } => self.lower_case(address.as_u32(), u32::from(*value), u32::from(*condition)),
+            Instruction::LogicalAnd { address, value } => {
+                self.lower_logical_and(reg_base, address.as_u32(), u32::from(*value))
+            }
+            Instruction::LogicalOr { address, value } => {
+                self.lower_logical_or(address.as_u32(), u32::from(*value))
+            }
+            Instruction::Coalesce { address, value } => {
+                self.lower_coalesce(address.as_u32(), u32::from(*value))
+            }
+            Instruction::IncrementLoopIteration => self.lower_increment_loop_iteration(),
+            Instruction::GetName { dst, binding_index } => {
+                self.lower_get_name(u32::from(*dst), u32::from(*binding_index))
+            }
+            Instruction::GetNameGlobal {
+                dst,
+                binding_index,
+                ic_index,
+            } => self.lower_get_name_global(
+                u32::from(*dst),
+                u32::from(*binding_index),
+                u32::from(*ic_index),
+            ),
+            Instruction::GetNameOrUndefined { dst, binding_index } => {
+                self.lower_get_name_or_undefined(u32::from(*dst), u32::from(*binding_index))
+            }
+            Instruction::GetNameAndLocator { dst, binding_index } => {
+                self.lower_get_name_and_locator(u32::from(*dst), u32::from(*binding_index))
+            }
+            Instruction::GetLocator { binding_index } => {
+                self.lower_get_locator(u32::from(*binding_index))
+            }
+            Instruction::SetName { src, binding_index } => {
+                self.lower_set_name(u32::from(*src), u32::from(*binding_index))
+            }
+            Instruction::SetNameByLocator { src } => {
+                self.lower_set_name_by_locator(u32::from(*src))
+            }
+            Instruction::PutLexicalValue { src, binding_index } => {
+                self.lower_put_lexical_value(u32::from(*src), u32::from(*binding_index))
+            }
+            Instruction::DefInitVar { src, binding_index } => {
+                self.lower_def_init_var(u32::from(*src), u32::from(*binding_index))
+            }
+            Instruction::DeleteName { dst, binding_index } => {
+                self.lower_delete_name(u32::from(*dst), u32::from(*binding_index))
+            }
+            Instruction::In { dst, lhs, rhs } => {
+                self.lower_in(u32::from(*dst), u32::from(*lhs), u32::from(*rhs))
+            }
+            Instruction::ToPropertyKey { src, dst } => {
+                self.lower_to_property_key(u32::from(*src), u32::from(*dst))
+            }
+            Instruction::GetPropertyByName {
+                dst,
+                value,
+                ic_index,
+            } => self.lower_get_property_by_name(
+                u32::from(*dst),
+                u32::from(*value),
+                u32::from(*ic_index),
+            ),
+            Instruction::SetPropertyByName {
+                value,
+                object,
+                ic_index,
+            } => self.lower_set_property_by_name(
+                u32::from(*value),
+                u32::from(*object),
+                u32::from(*ic_index),
+            ),
+            Instruction::GetPropertyByNameWithThis {
+                dst,
+                receiver,
+                value,
+                ic_index,
+            } => self.lower_get_property_by_name_with_this(
+                u32::from(*dst),
+                u32::from(*receiver),
+                u32::from(*value),
+                u32::from(*ic_index),
+            ),
+            Instruction::GetLengthProperty {
+                dst,
+                value,
+                ic_index,
+            } => self.lower_get_length_property(
+                u32::from(*dst),
+                u32::from(*value),
+                u32::from(*ic_index),
+            ),
+            Instruction::GetPropertyByValue {
+                dst,
+                key,
+                receiver,
+                object,
+            } => self.lower_get_property_by_value(
+                u32::from(*dst),
+                u32::from(*key),
+                u32::from(*receiver),
+                u32::from(*object),
+            ),
+            Instruction::GetPropertyByValuePush {
+                dst,
+                key,
+                receiver,
+                object,
+            } => self.lower_get_property_by_value_push(
+                u32::from(*dst),
+                u32::from(*key),
+                u32::from(*receiver),
+                u32::from(*object),
+            ),
+            Instruction::SetPropertyByValue {
+                value,
+                key,
+                receiver,
+                object,
+            } => self.lower_set_property_by_value(
+                u32::from(*value),
+                u32::from(*key),
+                u32::from(*receiver),
+                u32::from(*object),
+            ),
+            Instruction::DefineOwnPropertyByName {
+                object,
+                value,
+                name_index,
+            } => self.lower_define_own_property_by_name(
+                u32::from(*object),
+                u32::from(*value),
+                u32::from(*name_index),
+            ),
+            Instruction::DefineOwnPropertyByValue { value, key, object } => self
+                .lower_define_own_property_by_value(
+                    u32::from(*value),
+                    u32::from(*key),
+                    u32::from(*object),
+                ),
+            Instruction::DeletePropertyByName { object, name_index } => {
+                self.lower_delete_property_by_name(u32::from(*object), u32::from(*name_index))
+            }
+            Instruction::DeletePropertyByValue { object, key } => {
+                self.lower_delete_property_by_value(u32::from(*object), u32::from(*key))
+            }
+            Instruction::GetPrototype { object } => self.lower_get_prototype(u32::from(*object)),
+            Instruction::SetPrototype { object, prototype } => {
+                self.lower_set_prototype(u32::from(*object), u32::from(*prototype))
+            }
+            Instruction::StoreLiteral { dst, index } => {
+                self.lower_store_literal(u32::from(*dst), u32::from(*index))
+            }
+            Instruction::StoreEmptyObject { dst } => self.lower_store_empty_object(u32::from(*dst)),
+            Instruction::StoreNewArray { dst } => self.lower_store_new_array(u32::from(*dst)),
+            Instruction::StoreRegexp {
+                dst,
+                pattern_index,
+                flags_index,
+            } => self.lower_store_regexp(
+                u32::from(*dst),
+                u32::from(*pattern_index),
+                u32::from(*flags_index),
+            ),
+            Instruction::PushValueToArray { value, array } => {
+                self.lower_push_value_to_array(u32::from(*value), u32::from(*array))
+            }
+            Instruction::PushElisionToArray { array } => {
+                self.lower_push_elision_to_array(u32::from(*array))
+            }
+            Instruction::GetFunction { dst, index } => {
+                self.lower_get_function(u32::from(*dst), u32::from(*index))
+            }
+            Instruction::Call { argument_count } => self.lower_call(u32::from(*argument_count)),
+            Instruction::New { argument_count } => self.lower_new(u32::from(*argument_count)),
+            Instruction::PushScope { scope_index } => {
+                self.lower_push_scope(u32::from(*scope_index))
+            }
+            Instruction::CreateUnmappedArgumentsObject { dst } => {
+                self.lower_create_unmapped_arguments_object(u32::from(*dst))
+            }
+            Instruction::RestParameterInit { dst } => {
+                self.lower_rest_parameter_init(u32::from(*dst))
+            }
+            Instruction::SetRegisterFromAccumulator { dst } => {
+                self.lower_set_register_from_accumulator(u32::from(*dst))
+            }
+            Instruction::Throw { src } => self.lower_throw(u32::from(*src)),
+            Instruction::ThrowNewTypeError { message } => {
+                self.lower_throw_new_type_error(u32::from(*message))
+            }
+            Instruction::ThrowNewReferenceError { message } => {
+                self.lower_throw_new_reference_error(u32::from(*message))
+            }
+            Instruction::ThrowMutateImmutable { index } => {
+                self.lower_throw_mutate_immutable(u32::from(*index))
+            }
+            Instruction::CheckReturn => self.lower_check_return(),
+            Instruction::Return => {
+                return self.lower_return();
+            }
+            _ => {
+                let err = self.builder.ins().iconst(types::I64, 2);
+                self.builder.ins().return_(&[err]);
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl JitCompiler {
@@ -3421,7 +3828,7 @@ impl JitCompiler {
                 bytes: optimized.bytes.into_boxed_slice(),
             };
 
-            self.translate_body(
+            self.translate_body_ir(
                 &mut builder,
                 ctx_ptr,
                 reg_base_var,
@@ -4575,6 +4982,275 @@ impl JitCompiler {
 
         // Seal all blocks at once. This is simpler than tracking individual
         // block predecessors, especially with backward jumps (loops).
+        lctx.builder.seal_all_blocks();
+    }
+
+    /// Translate bytecode via IR: deserialize into basic blocks, then lower each block.
+    #[allow(clippy::items_after_statements)]
+    fn translate_body_ir(
+        &mut self,
+        builder: &mut FunctionBuilder<'_>,
+        ctx_ptr: Value,
+        reg_base_var: cranelift_frontend::Variable,
+        reg_base_slot: cranelift_codegen::ir::StackSlot,
+        code: &CodeBlock,
+        bytecode: &crate::vm::opcode::Bytecode,
+        type_map: &HashMap<u32, super::optimize::ValueType>,
+        _entry_block: Block,
+    ) {
+        // Import helper function references.
+        macro_rules! declare_refs {
+            ($($name:ident => $str:expr),* $(,)?) => {
+                $(let $name = self.helper_ref(builder, $str);)*
+            };
+        }
+        declare_refs! {
+            get_arg_ref => "jit_get_argument",
+            set_acc_ref => "jit_set_accumulator",
+            push_reg_ref => "jit_push_from_register",
+            pop_reg_ref => "jit_pop_into_register",
+            add_ref => "jit_add",
+            sub_ref => "jit_sub",
+            mul_ref => "jit_mul",
+            div_ref => "jit_div",
+            mod_ref => "jit_mod",
+            pow_ref => "jit_pow",
+            bit_or_ref => "jit_bit_or",
+            bit_and_ref => "jit_bit_and",
+            bit_xor_ref => "jit_bit_xor",
+            shl_ref => "jit_shl",
+            shr_ref => "jit_shr",
+            ushr_ref => "jit_ushr",
+            inc_ref => "jit_inc",
+            dec_ref => "jit_dec",
+            strict_eq_ref => "jit_strict_eq",
+            strict_ne_ref => "jit_strict_ne",
+            eq_ref => "jit_eq",
+            ne_ref => "jit_ne",
+            lt_ref => "jit_lt",
+            le_ref => "jit_le",
+            gt_ref => "jit_gt",
+            ge_ref => "jit_ge",
+            get_name_ref => "jit_get_name",
+            get_prop_name_ref => "jit_get_property_by_name",
+            get_length_ref => "jit_get_length_property",
+            get_prop_val_ref => "jit_get_property_by_value",
+            get_prop_val_push_ref => "jit_get_property_by_value_push",
+            set_prop_val_ref => "jit_set_property_by_value",
+            get_name_global_ref => "jit_get_name_global",
+            call_ref => "jit_call",
+            check_return_ref => "jit_check_return",
+            clone_val_ref => "jit_clone_value",
+            drop_val_ref => "jit_drop_value",
+            this_ref => "jit_this",
+            set_name_ref => "jit_set_name",
+            get_name_or_undef_ref => "jit_get_name_or_undefined",
+            get_name_and_loc_ref => "jit_get_name_and_locator",
+            get_locator_ref => "jit_get_locator",
+            set_name_by_loc_ref => "jit_set_name_by_locator",
+            put_lex_val_ref => "jit_put_lexical_value",
+            def_init_var_ref => "jit_def_init_var",
+            delete_name_ref => "jit_delete_name",
+            set_prop_name_ref => "jit_set_property_by_name",
+            get_prop_name_this_ref => "jit_get_property_by_name_with_this",
+            def_own_name_ref => "jit_define_own_property_by_name",
+            def_own_val_ref => "jit_define_own_property_by_value",
+            del_prop_name_ref => "jit_delete_property_by_name",
+            del_prop_val_ref => "jit_delete_property_by_value",
+            to_prop_key_ref => "jit_to_property_key",
+            in_ref => "jit_in",
+            get_proto_ref => "jit_get_prototype",
+            set_proto_ref => "jit_set_prototype",
+            store_literal_ref => "jit_store_literal",
+            store_empty_obj_ref => "jit_store_empty_object",
+            store_new_arr_ref => "jit_store_new_array",
+            store_regexp_ref => "jit_store_regexp",
+            push_val_arr_ref => "jit_push_value_to_array",
+            push_elision_ref => "jit_push_elision_to_array",
+            push_scope_ref => "jit_push_scope",
+            create_unmapped_args_ref => "jit_create_unmapped_arguments_object",
+            rest_param_ref => "jit_rest_parameter_init",
+            throw_type_err_ref => "jit_throw_new_type_error",
+            throw_ref_err_ref => "jit_throw_new_reference_error",
+            throw_mutate_ref => "jit_throw_mutate_immutable",
+            set_reg_from_acc_ref => "jit_set_register_from_accumulator",
+            neg_ref => "jit_neg",
+            pos_ref => "jit_pos",
+            bit_not_ref => "jit_bit_not",
+            logical_not_ref => "jit_logical_not",
+            type_of_ref => "jit_type_of",
+            is_object_ref => "jit_is_object",
+            instance_of_ref => "jit_instance_of",
+            vnnou_ref => "jit_value_not_null_or_undefined",
+            throw_ref => "jit_throw",
+            get_func_ref => "jit_get_function",
+            new_ref => "jit_new",
+            inc_loop_ref => "jit_increment_loop_iteration",
+            not_lt_ref => "jit_not_less_than",
+            ret_ref => "jit_check_return_and_return",
+        }
+
+        let error_block = builder.create_block();
+
+        // Build IR from bytecode.
+        let ir = super::ir::build_ir(bytecode);
+
+        // Create Cranelift blocks for each IR block, keyed by start_pc.
+        let mut block_map: HashMap<u32, Block> = HashMap::new();
+        for ir_block in &ir.blocks {
+            block_map
+                .entry(ir_block.start_pc)
+                .or_insert_with(|| builder.create_block());
+        }
+
+        let refs = HelperRefs {
+            get_arg_ref,
+            set_acc_ref,
+            push_reg_ref,
+            pop_reg_ref,
+            add_ref,
+            sub_ref,
+            mul_ref,
+            div_ref,
+            mod_ref,
+            pow_ref,
+            bit_or_ref,
+            bit_and_ref,
+            bit_xor_ref,
+            shl_ref,
+            shr_ref,
+            ushr_ref,
+            inc_ref,
+            dec_ref,
+            strict_eq_ref,
+            strict_ne_ref,
+            eq_ref,
+            ne_ref,
+            lt_ref,
+            le_ref,
+            gt_ref,
+            ge_ref,
+            get_name_ref,
+            get_prop_name_ref,
+            get_length_ref,
+            get_prop_val_ref,
+            get_prop_val_push_ref,
+            set_prop_val_ref,
+            get_name_global_ref,
+            call_ref,
+            check_return_ref,
+            clone_val_ref,
+            drop_val_ref,
+            this_ref,
+            set_name_ref,
+            get_name_or_undef_ref,
+            get_name_and_loc_ref,
+            get_locator_ref,
+            set_name_by_loc_ref,
+            put_lex_val_ref,
+            def_init_var_ref,
+            delete_name_ref,
+            set_prop_name_ref,
+            get_prop_name_this_ref,
+            def_own_name_ref,
+            def_own_val_ref,
+            del_prop_name_ref,
+            del_prop_val_ref,
+            to_prop_key_ref,
+            in_ref,
+            get_proto_ref,
+            set_proto_ref,
+            store_literal_ref,
+            store_empty_obj_ref,
+            store_new_arr_ref,
+            store_regexp_ref,
+            push_val_arr_ref,
+            push_elision_ref,
+            push_scope_ref,
+            create_unmapped_args_ref,
+            rest_param_ref,
+            throw_type_err_ref,
+            throw_ref_err_ref,
+            throw_mutate_ref,
+            set_reg_from_acc_ref,
+            neg_ref,
+            pos_ref,
+            bit_not_ref,
+            logical_not_ref,
+            type_of_ref,
+            is_object_ref,
+            instance_of_ref,
+            vnnou_ref,
+            throw_ref,
+            get_func_ref,
+            new_ref,
+            inc_loop_ref,
+            not_lt_ref,
+            ret_ref,
+        };
+
+        let mut lctx = LoweringContext {
+            builder,
+            ctx_ptr,
+            reg_base_var,
+            reg_base_slot,
+            error_block,
+            block_map: &block_map,
+            ptr_type: self.ptr_type,
+            type_map,
+            code,
+            ic_offsets: &self.ic_offsets,
+            refs,
+        };
+
+        // Walk IR blocks and lower each instruction.
+        // Track whether the previous block ended with a hard terminator
+        // (unconditional jump, return) so we know whether to emit a
+        // fallthrough jump to the next block.
+        let mut prev_terminated = false;
+
+        for ir_block in &ir.blocks {
+            let cl_block = block_map[&ir_block.start_pc];
+
+            if !prev_terminated {
+                lctx.builder.ins().jump(cl_block, &[]);
+            }
+            lctx.builder.switch_to_block(cl_block);
+
+            // Lower body instructions.
+            let mut terminated = false;
+            for &(pc, ref instruction) in &ir_block.body {
+                if terminated {
+                    break;
+                }
+                let reg_base = lctx.builder.use_var(reg_base_var);
+                terminated = lctx.lower_instruction(pc as usize, instruction, reg_base, self);
+            }
+
+            // Lower terminator.
+            if !terminated {
+                match &ir_block.terminator {
+                    super::ir::Terminator::Instruction(pc, instruction) => {
+                        let reg_base = lctx.builder.use_var(reg_base_var);
+                        terminated =
+                            lctx.lower_instruction(*pc as usize, instruction, reg_base, self);
+                    }
+                    super::ir::Terminator::Fallthrough | super::ir::Terminator::End => {}
+                }
+            }
+
+            prev_terminated = terminated;
+        }
+
+        if !prev_terminated {
+            let zero = lctx.builder.ins().iconst(types::I64, 0);
+            lctx.builder.ins().return_(&[zero]);
+        }
+
+        lctx.builder.switch_to_block(error_block);
+        let err_tag = lctx.builder.ins().iconst(types::I64, 2);
+        lctx.builder.ins().return_(&[err_tag]);
+
         lctx.builder.seal_all_blocks();
     }
 }
