@@ -160,6 +160,2831 @@ impl std::fmt::Debug for JitCompiler {
     }
 }
 
+/// Holds all imported `FuncRef` values for the current function being compiled.
+struct HelperRefs {
+    get_arg_ref: cranelift_codegen::ir::FuncRef,
+    set_acc_ref: cranelift_codegen::ir::FuncRef,
+    push_reg_ref: cranelift_codegen::ir::FuncRef,
+    pop_reg_ref: cranelift_codegen::ir::FuncRef,
+    add_ref: cranelift_codegen::ir::FuncRef,
+    sub_ref: cranelift_codegen::ir::FuncRef,
+    mul_ref: cranelift_codegen::ir::FuncRef,
+    div_ref: cranelift_codegen::ir::FuncRef,
+    mod_ref: cranelift_codegen::ir::FuncRef,
+    pow_ref: cranelift_codegen::ir::FuncRef,
+    bit_or_ref: cranelift_codegen::ir::FuncRef,
+    bit_and_ref: cranelift_codegen::ir::FuncRef,
+    bit_xor_ref: cranelift_codegen::ir::FuncRef,
+    shl_ref: cranelift_codegen::ir::FuncRef,
+    shr_ref: cranelift_codegen::ir::FuncRef,
+    ushr_ref: cranelift_codegen::ir::FuncRef,
+    inc_ref: cranelift_codegen::ir::FuncRef,
+    dec_ref: cranelift_codegen::ir::FuncRef,
+    strict_eq_ref: cranelift_codegen::ir::FuncRef,
+    strict_ne_ref: cranelift_codegen::ir::FuncRef,
+    eq_ref: cranelift_codegen::ir::FuncRef,
+    ne_ref: cranelift_codegen::ir::FuncRef,
+    lt_ref: cranelift_codegen::ir::FuncRef,
+    le_ref: cranelift_codegen::ir::FuncRef,
+    gt_ref: cranelift_codegen::ir::FuncRef,
+    ge_ref: cranelift_codegen::ir::FuncRef,
+    get_name_ref: cranelift_codegen::ir::FuncRef,
+    get_prop_name_ref: cranelift_codegen::ir::FuncRef,
+    get_length_ref: cranelift_codegen::ir::FuncRef,
+    get_prop_val_ref: cranelift_codegen::ir::FuncRef,
+    get_prop_val_push_ref: cranelift_codegen::ir::FuncRef,
+    set_prop_val_ref: cranelift_codegen::ir::FuncRef,
+    get_name_global_ref: cranelift_codegen::ir::FuncRef,
+    call_ref: cranelift_codegen::ir::FuncRef,
+    check_return_ref: cranelift_codegen::ir::FuncRef,
+    clone_val_ref: cranelift_codegen::ir::FuncRef,
+    drop_val_ref: cranelift_codegen::ir::FuncRef,
+    this_ref: cranelift_codegen::ir::FuncRef,
+    set_name_ref: cranelift_codegen::ir::FuncRef,
+    get_name_or_undef_ref: cranelift_codegen::ir::FuncRef,
+    get_name_and_loc_ref: cranelift_codegen::ir::FuncRef,
+    get_locator_ref: cranelift_codegen::ir::FuncRef,
+    set_name_by_loc_ref: cranelift_codegen::ir::FuncRef,
+    put_lex_val_ref: cranelift_codegen::ir::FuncRef,
+    def_init_var_ref: cranelift_codegen::ir::FuncRef,
+    delete_name_ref: cranelift_codegen::ir::FuncRef,
+    set_prop_name_ref: cranelift_codegen::ir::FuncRef,
+    get_prop_name_this_ref: cranelift_codegen::ir::FuncRef,
+    def_own_name_ref: cranelift_codegen::ir::FuncRef,
+    def_own_val_ref: cranelift_codegen::ir::FuncRef,
+    del_prop_name_ref: cranelift_codegen::ir::FuncRef,
+    del_prop_val_ref: cranelift_codegen::ir::FuncRef,
+    to_prop_key_ref: cranelift_codegen::ir::FuncRef,
+    in_ref: cranelift_codegen::ir::FuncRef,
+    get_proto_ref: cranelift_codegen::ir::FuncRef,
+    set_proto_ref: cranelift_codegen::ir::FuncRef,
+    store_literal_ref: cranelift_codegen::ir::FuncRef,
+    store_empty_obj_ref: cranelift_codegen::ir::FuncRef,
+    store_new_arr_ref: cranelift_codegen::ir::FuncRef,
+    store_regexp_ref: cranelift_codegen::ir::FuncRef,
+    push_val_arr_ref: cranelift_codegen::ir::FuncRef,
+    push_elision_ref: cranelift_codegen::ir::FuncRef,
+    push_scope_ref: cranelift_codegen::ir::FuncRef,
+    create_unmapped_args_ref: cranelift_codegen::ir::FuncRef,
+    rest_param_ref: cranelift_codegen::ir::FuncRef,
+    throw_type_err_ref: cranelift_codegen::ir::FuncRef,
+    throw_ref_err_ref: cranelift_codegen::ir::FuncRef,
+    throw_mutate_ref: cranelift_codegen::ir::FuncRef,
+    set_reg_from_acc_ref: cranelift_codegen::ir::FuncRef,
+    neg_ref: cranelift_codegen::ir::FuncRef,
+    pos_ref: cranelift_codegen::ir::FuncRef,
+    bit_not_ref: cranelift_codegen::ir::FuncRef,
+    logical_not_ref: cranelift_codegen::ir::FuncRef,
+    type_of_ref: cranelift_codegen::ir::FuncRef,
+    is_object_ref: cranelift_codegen::ir::FuncRef,
+    instance_of_ref: cranelift_codegen::ir::FuncRef,
+    vnnou_ref: cranelift_codegen::ir::FuncRef,
+    throw_ref: cranelift_codegen::ir::FuncRef,
+    get_func_ref: cranelift_codegen::ir::FuncRef,
+    new_ref: cranelift_codegen::ir::FuncRef,
+    inc_loop_ref: cranelift_codegen::ir::FuncRef,
+    not_lt_ref: cranelift_codegen::ir::FuncRef,
+    ret_ref: cranelift_codegen::ir::FuncRef,
+}
+
+/// Shared context for lowering individual instructions to Cranelift IR.
+struct LoweringContext<'a, 'b> {
+    builder: &'a mut FunctionBuilder<'b>,
+    ctx_ptr: Value,
+    reg_base_var: cranelift_frontend::Variable,
+    reg_base_slot: cranelift_codegen::ir::StackSlot,
+    error_block: Block,
+    block_map: &'a HashMap<u32, Block>,
+    ptr_type: Type,
+    type_map: &'a HashMap<u32, super::optimize::ValueType>,
+    code: &'a CodeBlock,
+    ic_offsets: &'a helpers::IcOffsets,
+    refs: HelperRefs,
+}
+
+impl LoweringContext<'_, '_> {
+    fn i32const(&mut self, val: u32) -> Value {
+        self.builder.ins().iconst(types::I32, i64::from(val))
+    }
+
+    // -----------------------------------------------------------------------
+    // Constants
+    // -----------------------------------------------------------------------
+
+    fn lower_store_constant(&mut self, reg_base: Value, dst: u32, tagged_value: i64) {
+        let tagged = self.builder.ins().iconst(types::I64, tagged_value);
+        let off = (dst as i32) * 8;
+        self.builder.ins().store(
+            cranelift_codegen::ir::MemFlags::trusted(),
+            tagged,
+            reg_base,
+            off,
+        );
+    }
+
+    fn lower_store_zero(&mut self, reg_base: Value, dst: u32) {
+        self.lower_store_constant(reg_base, dst, JitCompiler::MASK_INT32 as i64);
+    }
+
+    fn lower_store_one(&mut self, reg_base: Value, dst: u32) {
+        self.lower_store_constant(reg_base, dst, (JitCompiler::MASK_INT32 | 1) as i64);
+    }
+
+    fn lower_store_int8(&mut self, reg_base: Value, dst: u32, value: i8) {
+        let tagged_val = JitCompiler::MASK_INT32 | (u64::from(value as u32) & 0xFFFF_FFFF);
+        self.lower_store_constant(reg_base, dst, tagged_val as i64);
+    }
+
+    fn lower_store_int16(&mut self, reg_base: Value, dst: u32, value: i16) {
+        let tagged_val = JitCompiler::MASK_INT32 | (u64::from(value as u32) & 0xFFFF_FFFF);
+        self.lower_store_constant(reg_base, dst, tagged_val as i64);
+    }
+
+    fn lower_store_int32(&mut self, reg_base: Value, dst: u32, value: i32) {
+        let tagged_val = JitCompiler::MASK_INT32 | (u64::from(value as u32) & 0xFFFF_FFFF);
+        self.lower_store_constant(reg_base, dst, tagged_val as i64);
+    }
+
+    fn lower_store_float(&mut self, reg_base: Value, dst: u32, value: f32) {
+        let bits = f64::from(value).to_bits();
+        self.lower_store_constant(reg_base, dst, bits as i64);
+    }
+
+    fn lower_store_double(&mut self, reg_base: Value, dst: u32, value: f64) {
+        let bits = value.to_bits();
+        self.lower_store_constant(reg_base, dst, bits as i64);
+    }
+
+    fn lower_store_nan(&mut self, reg_base: Value, dst: u32) {
+        self.lower_store_constant(reg_base, dst, JitCompiler::VALUE_NAN as i64);
+    }
+
+    fn lower_store_positive_infinity(&mut self, reg_base: Value, dst: u32) {
+        self.lower_store_constant(reg_base, dst, JitCompiler::VALUE_POS_INF as i64);
+    }
+
+    fn lower_store_negative_infinity(&mut self, reg_base: Value, dst: u32) {
+        self.lower_store_constant(reg_base, dst, JitCompiler::VALUE_NEG_INF as i64);
+    }
+
+    fn lower_store_null(&mut self, reg_base: Value, dst: u32) {
+        self.lower_store_constant(reg_base, dst, JitCompiler::VALUE_NULL as i64);
+    }
+
+    fn lower_store_true(&mut self, reg_base: Value, dst: u32) {
+        self.lower_store_constant(reg_base, dst, JitCompiler::VALUE_TRUE as i64);
+    }
+
+    fn lower_store_false(&mut self, reg_base: Value, dst: u32) {
+        self.lower_store_constant(reg_base, dst, JitCompiler::VALUE_FALSE as i64);
+    }
+
+    fn lower_store_undefined(&mut self, reg_base: Value, dst: u32) {
+        self.lower_store_constant(reg_base, dst, JitCompiler::VALUE_UNDEFINED as i64);
+    }
+
+    // -----------------------------------------------------------------------
+    // Data movement
+    // -----------------------------------------------------------------------
+
+    fn lower_this(&mut self, dst: u32) {
+        let d = self.i32const(dst);
+        self.builder
+            .ins()
+            .call(self.refs.this_ref, &[self.ctx_ptr, d]);
+    }
+
+    fn lower_get_argument(&mut self, index: u32, dst: u32) {
+        let idx = self.i32const(index);
+        let d = self.i32const(dst);
+        self.builder
+            .ins()
+            .call(self.refs.get_arg_ref, &[self.ctx_ptr, idx, d]);
+    }
+
+    fn lower_move(&mut self, reg_base: Value, dst: u32, src: u32) {
+        // GC-safe Move: raw u64 copy + refcount management for pointer types.
+        // Optimized: single check — if EITHER value is a pointer type,
+        // branch to the slow path. Common case (both primitives) is one
+        // OR + one compare + one branch-not-taken.
+        let old_dst = JitCompiler::load_reg(self.builder, reg_base, dst);
+        let new_val = JitCompiler::load_reg(self.builder, reg_base, src);
+        JitCompiler::store_reg(self.builder, reg_base, dst, new_val);
+
+        let mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+        let ptr_threshold = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_OBJECT as i64);
+
+        // OR the tags — if either is a pointer type, the result will be >= MASK_OBJECT.
+        let new_tag = self.builder.ins().band(new_val, mask);
+        let old_tag = self.builder.ins().band(old_dst, mask);
+        let either_tag = self.builder.ins().bor(new_tag, old_tag);
+        let either_is_ptr = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+            either_tag,
+            ptr_threshold,
+        );
+
+        let gc_block = self.builder.create_block();
+        let after_gc = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(either_is_ptr, gc_block, &[], after_gc, &[]);
+
+        // Slow path: handle clone/drop individually.
+        self.builder.switch_to_block(gc_block);
+        let new_is_ptr = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+            new_tag,
+            ptr_threshold,
+        );
+        let clone_block = self.builder.create_block();
+        let check_drop = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(new_is_ptr, clone_block, &[], check_drop, &[]);
+
+        self.builder.switch_to_block(clone_block);
+        self.builder.ins().call(self.refs.clone_val_ref, &[new_val]);
+        self.builder.ins().jump(check_drop, &[]);
+
+        self.builder.switch_to_block(check_drop);
+        let old_is_ptr = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+            old_tag,
+            ptr_threshold,
+        );
+        let drop_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(old_is_ptr, drop_block, &[], after_gc, &[]);
+
+        self.builder.switch_to_block(drop_block);
+        self.builder.ins().call(self.refs.drop_val_ref, &[old_dst]);
+        self.builder.ins().jump(after_gc, &[]);
+
+        self.builder.switch_to_block(after_gc);
+    }
+
+    fn lower_set_accumulator(&mut self, src: u32) {
+        let s = self.i32const(src);
+        self.builder
+            .ins()
+            .call(self.refs.set_acc_ref, &[self.ctx_ptr, s]);
+    }
+
+    fn lower_push_from_register(&mut self, src: u32) {
+        let s = self.i32const(src);
+        self.builder
+            .ins()
+            .call(self.refs.push_reg_ref, &[self.ctx_ptr, s]);
+    }
+
+    fn lower_pop_into_register(&mut self, dst: u32) {
+        let d = self.i32const(dst);
+        self.builder
+            .ins()
+            .call(self.refs.pop_reg_ref, &[self.ctx_ptr, d]);
+    }
+
+    fn lower_pop(&mut self) {
+        let d = self.i32const(0);
+        self.builder
+            .ins()
+            .call(self.refs.pop_reg_ref, &[self.ctx_ptr, d]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Arithmetic
+    // -----------------------------------------------------------------------
+
+    fn lower_add(&mut self, reg_base: Value, pc: usize, dst: u32, lhs: u32, rhs: u32) {
+        let known_int = self
+            .type_map
+            .get(&(pc as u32))
+            .is_some_and(|t| *t == super::optimize::ValueType::Int32);
+        JitCompiler::emit_inlined_add(
+            self.builder,
+            self.ctx_ptr,
+            reg_base,
+            self.reg_base_var,
+            self.reg_base_slot,
+            dst,
+            lhs,
+            rhs,
+            self.refs.add_ref,
+            self.error_block,
+            known_int,
+        );
+    }
+
+    fn lower_sub(
+        &mut self,
+        compiler: &JitCompiler,
+        reg_base: Value,
+        pc: usize,
+        dst: u32,
+        lhs: u32,
+        rhs: u32,
+    ) {
+        let known_int = self
+            .type_map
+            .get(&(pc as u32))
+            .is_some_and(|t| *t == super::optimize::ValueType::Int32);
+        compiler.emit_inlined_int_binop(
+            self.builder,
+            self.ctx_ptr,
+            reg_base,
+            self.reg_base_var,
+            self.reg_base_slot,
+            dst,
+            lhs,
+            rhs,
+            IntBinOp::Sub,
+            self.refs.sub_ref,
+            self.error_block,
+            known_int,
+        );
+    }
+
+    fn lower_mul(
+        &mut self,
+        compiler: &JitCompiler,
+        reg_base: Value,
+        pc: usize,
+        dst: u32,
+        lhs: u32,
+        rhs: u32,
+    ) {
+        let known_int = self
+            .type_map
+            .get(&(pc as u32))
+            .is_some_and(|t| *t == super::optimize::ValueType::Int32);
+        compiler.emit_inlined_int_binop(
+            self.builder,
+            self.ctx_ptr,
+            reg_base,
+            self.reg_base_var,
+            self.reg_base_slot,
+            dst,
+            lhs,
+            rhs,
+            IntBinOp::Mul,
+            self.refs.mul_ref,
+            self.error_block,
+            known_int,
+        );
+    }
+
+    fn lower_div(&mut self, dst: u32, lhs: u32, rhs: u32) {
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.div_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_mod(&mut self, reg_base: Value, dst: u32, lhs: u32, rhs: u32) {
+        // Inline integer fast path for `%`.
+        let lhs_val = JitCompiler::load_reg(self.builder, reg_base, lhs);
+        let rhs_val = JitCompiler::load_reg(self.builder, reg_base, rhs);
+        let mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+        let int_tag = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_INT32 as i64);
+        let lt = self.builder.ins().band(lhs_val, mask);
+        let rt = self.builder.ins().band(rhs_val, mask);
+        let li =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lt, int_tag);
+        let ri =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rt, int_tag);
+        let both = self.builder.ins().band(li, ri);
+
+        let fast_block = self.builder.create_block();
+        let slow_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(both, fast_block, &[], slow_block, &[]);
+
+        self.builder.switch_to_block(fast_block);
+        let lhs_i32 = self.builder.ins().ireduce(types::I32, lhs_val);
+        let rhs_i32 = self.builder.ins().ireduce(types::I32, rhs_val);
+        // Check for rhs == 0 (division by zero -> slow path).
+        let zero_i32 = self.builder.ins().iconst(types::I32, 0);
+        let rhs_nonzero = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+            rhs_i32,
+            zero_i32,
+        );
+        let rem_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(rhs_nonzero, rem_block, &[], slow_block, &[]);
+
+        self.builder.switch_to_block(rem_block);
+        // Also check for MIN % -1 overflow.
+        let min_val = self.builder.ins().iconst(types::I32, i64::from(i32::MIN));
+        let neg_one = self.builder.ins().iconst(types::I32, -1_i64);
+        let is_min = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            lhs_i32,
+            min_val,
+        );
+        let is_neg1 = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            rhs_i32,
+            neg_one,
+        );
+        let is_overflow = self.builder.ins().band(is_min, is_neg1);
+        let safe_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_overflow, slow_block, &[], safe_block, &[]);
+
+        self.builder.switch_to_block(safe_block);
+        let result = self.builder.ins().srem(lhs_i32, rhs_i32);
+        let result_u64 = self.builder.ins().uextend(types::I64, result);
+        let mask32 = self.builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
+        let result_masked = self.builder.ins().band(result_u64, mask32);
+        let result_tagged = self.builder.ins().bor(result_masked, int_tag);
+        JitCompiler::store_reg(self.builder, reg_base, dst, result_tagged);
+        self.builder.ins().jump(merge_block, &[]);
+
+        self.builder.switch_to_block(slow_block);
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.mod_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+        self.builder.ins().jump(merge_block, &[]);
+
+        self.builder.switch_to_block(merge_block);
+    }
+
+    fn lower_pow(&mut self, dst: u32, lhs: u32, rhs: u32) {
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.pow_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_neg(&mut self, value: u32) {
+        let v = self.i32const(value);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.neg_ref,
+            &[self.ctx_ptr, v],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_pos(&mut self, value: u32) {
+        let v = self.i32const(value);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.pos_ref,
+            &[self.ctx_ptr, v],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_inc(&mut self, reg_base: Value, dst: u32, src: u32) {
+        // Inline integer fast path for i++ (most common case).
+        let src_val = JitCompiler::load_reg(self.builder, reg_base, src);
+        let mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+        let int_tag = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_INT32 as i64);
+        let src_tag = self.builder.ins().band(src_val, mask);
+        let is_int = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            src_tag,
+            int_tag,
+        );
+
+        let fast_block = self.builder.create_block();
+        let slow_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_int, fast_block, &[], slow_block, &[]);
+
+        // Fast path: extract i32, check < MAX, increment, store both.
+        self.builder.switch_to_block(fast_block);
+
+        let src_i32 = self.builder.ins().ireduce(types::I32, src_val);
+        let max_val = self.builder.ins().iconst(types::I32, i64::from(i32::MAX));
+        let not_max = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
+            src_i32,
+            max_val,
+        );
+
+        let inc_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(not_max, inc_block, &[], slow_block, &[]);
+
+        self.builder.switch_to_block(inc_block);
+
+        let one_i32 = self.builder.ins().iconst(types::I32, 1);
+        let incremented = self.builder.ins().iadd(src_i32, one_i32);
+        // Tag the incremented value.
+        let inc_u64 = self.builder.ins().uextend(types::I64, incremented);
+        let mask32 = self.builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
+        let inc_masked = self.builder.ins().band(inc_u64, mask32);
+        let inc_tagged = self.builder.ins().bor(inc_masked, int_tag);
+        // Inc writes original to src, incremented to dst.
+        JitCompiler::store_reg(self.builder, reg_base, src, src_val);
+        JitCompiler::store_reg(self.builder, reg_base, dst, inc_tagged);
+        self.builder.ins().jump(merge_block, &[]);
+
+        // Slow path.
+        self.builder.switch_to_block(slow_block);
+
+        let d = self.i32const(dst);
+        let s = self.i32const(src);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.inc_ref,
+            &[self.ctx_ptr, d, s],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+        self.builder.ins().jump(merge_block, &[]);
+
+        self.builder.switch_to_block(merge_block);
+    }
+
+    fn lower_dec(&mut self, reg_base: Value, dst: u32, src: u32) {
+        // Inline integer fast path for i-- (same pattern as Inc).
+        let src_val = JitCompiler::load_reg(self.builder, reg_base, src);
+        let mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+        let int_tag = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_INT32 as i64);
+        let src_tag = self.builder.ins().band(src_val, mask);
+        let is_int = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            src_tag,
+            int_tag,
+        );
+
+        let fast_block = self.builder.create_block();
+        let slow_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_int, fast_block, &[], slow_block, &[]);
+
+        self.builder.switch_to_block(fast_block);
+        let src_i32 = self.builder.ins().ireduce(types::I32, src_val);
+        let min_val = self.builder.ins().iconst(types::I32, i64::from(i32::MIN));
+        let not_min = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
+            src_i32,
+            min_val,
+        );
+        let dec_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(not_min, dec_block, &[], slow_block, &[]);
+
+        self.builder.switch_to_block(dec_block);
+        let one_i32 = self.builder.ins().iconst(types::I32, 1);
+        let decremented = self.builder.ins().isub(src_i32, one_i32);
+        let dec_u64 = self.builder.ins().uextend(types::I64, decremented);
+        let mask32 = self.builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
+        let dec_masked = self.builder.ins().band(dec_u64, mask32);
+        let dec_tagged = self.builder.ins().bor(dec_masked, int_tag);
+        // Dec writes original to src, decremented to dst.
+        JitCompiler::store_reg(self.builder, reg_base, src, src_val);
+        JitCompiler::store_reg(self.builder, reg_base, dst, dec_tagged);
+        self.builder.ins().jump(merge_block, &[]);
+
+        self.builder.switch_to_block(slow_block);
+        let d = self.i32const(dst);
+        let s = self.i32const(src);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.dec_ref,
+            &[self.ctx_ptr, d, s],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+        self.builder.ins().jump(merge_block, &[]);
+
+        self.builder.switch_to_block(merge_block);
+    }
+
+    // -----------------------------------------------------------------------
+    // Bitwise
+    // -----------------------------------------------------------------------
+
+    fn lower_bit_or(&mut self, reg_base: Value, dst: u32, lhs: u32, rhs: u32) {
+        // Inline integer fast path for `|`.
+        let lhs_val = JitCompiler::load_reg(self.builder, reg_base, lhs);
+        let rhs_val = JitCompiler::load_reg(self.builder, reg_base, rhs);
+        let mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+        let int_tag = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_INT32 as i64);
+        let lhs_tag = self.builder.ins().band(lhs_val, mask);
+        let rhs_tag = self.builder.ins().band(rhs_val, mask);
+        let lhs_is_int = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            lhs_tag,
+            int_tag,
+        );
+        let rhs_is_int = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            rhs_tag,
+            int_tag,
+        );
+        let both_int = self.builder.ins().band(lhs_is_int, rhs_is_int);
+
+        let fast_block = self.builder.create_block();
+        let slow_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(both_int, fast_block, &[], slow_block, &[]);
+
+        // Fast: i32 bitwise OR, always succeeds (no overflow possible).
+        self.builder.switch_to_block(fast_block);
+
+        let lhs_i32 = self.builder.ins().ireduce(types::I32, lhs_val);
+        let rhs_i32 = self.builder.ins().ireduce(types::I32, rhs_val);
+        let result = self.builder.ins().bor(lhs_i32, rhs_i32);
+        let result_u64 = self.builder.ins().uextend(types::I64, result);
+        let mask32 = self.builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
+        let result_masked = self.builder.ins().band(result_u64, mask32);
+        let result_tagged = self.builder.ins().bor(result_masked, int_tag);
+        JitCompiler::store_reg(self.builder, reg_base, dst, result_tagged);
+        self.builder.ins().jump(merge_block, &[]);
+
+        // Slow path.
+        self.builder.switch_to_block(slow_block);
+
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.bit_or_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+        self.builder.ins().jump(merge_block, &[]);
+
+        self.builder.switch_to_block(merge_block);
+    }
+
+    fn lower_bit_and(
+        &mut self,
+        compiler: &JitCompiler,
+        reg_base: Value,
+        dst: u32,
+        lhs: u32,
+        rhs: u32,
+    ) {
+        compiler.emit_inlined_int_bitop(
+            self.builder,
+            self.ctx_ptr,
+            reg_base,
+            self.reg_base_var,
+            self.reg_base_slot,
+            dst,
+            lhs,
+            rhs,
+            IntBitOp::And,
+            self.refs.bit_and_ref,
+            self.error_block,
+        );
+    }
+
+    fn lower_bit_xor(
+        &mut self,
+        compiler: &JitCompiler,
+        reg_base: Value,
+        dst: u32,
+        lhs: u32,
+        rhs: u32,
+    ) {
+        compiler.emit_inlined_int_bitop(
+            self.builder,
+            self.ctx_ptr,
+            reg_base,
+            self.reg_base_var,
+            self.reg_base_slot,
+            dst,
+            lhs,
+            rhs,
+            IntBitOp::Xor,
+            self.refs.bit_xor_ref,
+            self.error_block,
+        );
+    }
+
+    fn lower_bit_not(&mut self, value: u32) {
+        let v = self.i32const(value);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.bit_not_ref,
+            &[self.ctx_ptr, v],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_shift_left(&mut self, dst: u32, lhs: u32, rhs: u32) {
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.shl_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_shift_right(&mut self, dst: u32, lhs: u32, rhs: u32) {
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.shr_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_unsigned_shift_right(&mut self, dst: u32, lhs: u32, rhs: u32) {
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.ushr_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Comparison
+    // -----------------------------------------------------------------------
+
+    fn lower_strict_eq(&mut self, reg_base: Value, dst: u32, lhs: u32, rhs: u32) {
+        // Inline: for integers, strict_equals is just u64 comparison.
+        // For non-integers (objects, strings), we need the helper.
+        let lhs_val = JitCompiler::load_reg(self.builder, reg_base, lhs);
+        let rhs_val = JitCompiler::load_reg(self.builder, reg_base, rhs);
+        let mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+        let int_tag = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_INT32 as i64);
+        let lt = self.builder.ins().band(lhs_val, mask);
+        let rt = self.builder.ins().band(rhs_val, mask);
+        let li =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lt, int_tag);
+        let ri =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rt, int_tag);
+        let both = self.builder.ins().band(li, ri);
+
+        let fast_block = self.builder.create_block();
+        let slow_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(both, fast_block, &[], slow_block, &[]);
+
+        // Fast: compare the full u64 values.
+        self.builder.switch_to_block(fast_block);
+        let is_eq = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            lhs_val,
+            rhs_val,
+        );
+        // Boolean true = 0x7FFA_0000_0000_0001, false = 0x7FFA_0000_0000_0000
+        let bool_false = self
+            .builder
+            .ins()
+            .iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
+        let _one = self.builder.ins().iconst(types::I64, 1);
+        let ext = self.builder.ins().uextend(types::I64, is_eq);
+        let result = self.builder.ins().bor(bool_false, ext);
+        JitCompiler::store_reg(self.builder, reg_base, dst, result);
+        self.builder.ins().jump(merge_block, &[]);
+
+        // Slow: call helper for non-integer types.
+        self.builder.switch_to_block(slow_block);
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        self.builder
+            .ins()
+            .call(self.refs.strict_eq_ref, &[self.ctx_ptr, d, l, r]);
+        self.builder.ins().jump(merge_block, &[]);
+
+        self.builder.switch_to_block(merge_block);
+    }
+
+    fn lower_strict_not_eq(&mut self, reg_base: Value, dst: u32, lhs: u32, rhs: u32) {
+        let lhs_val = JitCompiler::load_reg(self.builder, reg_base, lhs);
+        let rhs_val = JitCompiler::load_reg(self.builder, reg_base, rhs);
+        let mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+        let int_tag = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_INT32 as i64);
+        let lt = self.builder.ins().band(lhs_val, mask);
+        let rt = self.builder.ins().band(rhs_val, mask);
+        let li =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lt, int_tag);
+        let ri =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rt, int_tag);
+        let both = self.builder.ins().band(li, ri);
+
+        let fast_block = self.builder.create_block();
+        let slow_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(both, fast_block, &[], slow_block, &[]);
+
+        self.builder.switch_to_block(fast_block);
+        let is_ne = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+            lhs_val,
+            rhs_val,
+        );
+        let bool_false = self
+            .builder
+            .ins()
+            .iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
+        let ext = self.builder.ins().uextend(types::I64, is_ne);
+        let result = self.builder.ins().bor(bool_false, ext);
+        JitCompiler::store_reg(self.builder, reg_base, dst, result);
+        self.builder.ins().jump(merge_block, &[]);
+
+        self.builder.switch_to_block(slow_block);
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        self.builder
+            .ins()
+            .call(self.refs.strict_ne_ref, &[self.ctx_ptr, d, l, r]);
+        self.builder.ins().jump(merge_block, &[]);
+
+        self.builder.switch_to_block(merge_block);
+    }
+
+    fn lower_eq(&mut self, dst: u32, lhs: u32, rhs: u32) {
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.eq_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_not_eq(&mut self, dst: u32, lhs: u32, rhs: u32) {
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.ne_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_greater_than(&mut self, dst: u32, lhs: u32, rhs: u32) {
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.gt_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_greater_than_or_eq(&mut self, dst: u32, lhs: u32, rhs: u32) {
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.ge_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_less_than(&mut self, dst: u32, lhs: u32, rhs: u32) {
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.lt_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_less_than_or_eq(&mut self, dst: u32, lhs: u32, rhs: u32) {
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.le_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_instance_of(&mut self, dst: u32, lhs: u32, rhs: u32) {
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.instance_of_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Type checks
+    // -----------------------------------------------------------------------
+
+    fn lower_type_of(&mut self, value: u32) {
+        let v = self.i32const(value);
+        self.builder
+            .ins()
+            .call(self.refs.type_of_ref, &[self.ctx_ptr, v]);
+    }
+
+    fn lower_is_object(&mut self, value: u32) {
+        let v = self.i32const(value);
+        self.builder
+            .ins()
+            .call(self.refs.is_object_ref, &[self.ctx_ptr, v]);
+    }
+
+    fn lower_value_not_null_or_undefined(&mut self, src: u32) {
+        let v = self.i32const(src);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.vnnou_ref,
+            &[self.ctx_ptr, v],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_logical_not(&mut self, value: u32) {
+        let v = self.i32const(value);
+        self.builder
+            .ins()
+            .call(self.refs.logical_not_ref, &[self.ctx_ptr, v]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Control flow
+    // -----------------------------------------------------------------------
+
+    fn lower_jump(&mut self, address: u32) {
+        let target = self.block_map[&address];
+        self.builder.ins().jump(target, &[]);
+    }
+
+    fn lower_jump_if_true(&mut self, reg_base: Value, address: u32, value: u32) {
+        let target = self.block_map[&address];
+        // Inline: load the value, check NaN-boxing tag for boolean.
+        let val = JitCompiler::load_reg(self.builder, reg_base, value);
+        // Boolean true is 0x7FFA_0000_0000_0001, false is 0x7FFA_0000_0000_0000.
+        // Check if it's a boolean by comparing tag, then check low bit.
+        let bool_tag = self
+            .builder
+            .ins()
+            .iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
+        let mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+        let val_tag = self.builder.ins().band(val, mask);
+        let is_bool = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            val_tag,
+            bool_tag,
+        );
+        let fast_block = self.builder.create_block();
+        let slow_block = self.builder.create_block();
+        let cont_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_bool, fast_block, &[], slow_block, &[]);
+
+        // Fast: check low bit for true/false.
+        self.builder.switch_to_block(fast_block);
+        let one = self.builder.ins().iconst(types::I64, 1);
+        let low_bit = self.builder.ins().band(val, one);
+        let zero64 = self.builder.ins().iconst(types::I64, 0);
+        let is_true = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+            low_bit,
+            zero64,
+        );
+        self.builder
+            .ins()
+            .brif(is_true, target, &[], cont_block, &[]);
+
+        // Slow: call to_boolean via helper. For now just use a simple
+        // check — integer 0 and undefined/null are falsy.
+        // Actually, to_boolean is complex (strings, objects, etc).
+        // Since we only JIT primitives, and StrictEq/comparisons produce
+        // booleans, the fast path should cover most cases.
+        // For safety, call the helper for non-boolean values.
+        self.builder.switch_to_block(slow_block);
+        // Check for integer 0 (falsy) or non-zero (truthy).
+        let int_tag_v = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_INT32 as i64);
+        let val_tag2 = self.builder.ins().band(val, mask);
+        let is_int = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            val_tag2,
+            int_tag_v,
+        );
+        let int_check_block = self.builder.create_block();
+        let very_slow = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_int, int_check_block, &[], very_slow, &[]);
+
+        self.builder.switch_to_block(int_check_block);
+        let val_i32 = self.builder.ins().ireduce(types::I32, val);
+        let zero_i32 = self.builder.ins().iconst(types::I32, 0);
+        let is_nonzero = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+            val_i32,
+            zero_i32,
+        );
+        self.builder
+            .ins()
+            .brif(is_nonzero, target, &[], cont_block, &[]);
+
+        // Very slow: undefined (0x7FFB..0001) and null (0x7FFB..0000) are falsy.
+        // Everything else is truthy for primitives.
+        self.builder.switch_to_block(very_slow);
+        let undef = self
+            .builder
+            .ins()
+            .iconst(types::I64, 0x7FFB_0000_0000_0001_u64 as i64);
+        let null = self
+            .builder
+            .ins()
+            .iconst(types::I64, 0x7FFB_0000_0000_0000_u64 as i64);
+        let is_undef =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, undef);
+        let is_null =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, null);
+        let falsy = self.builder.ins().bor(is_undef, is_null);
+        // If falsy -> don't jump (continue). If not falsy -> truthy -> jump.
+        // Invert: brif(is_falsy, cont, target)
+        self.builder.ins().brif(falsy, cont_block, &[], target, &[]);
+
+        self.builder.switch_to_block(cont_block);
+    }
+
+    fn lower_jump_if_false(&mut self, reg_base: Value, address: u32, value: u32) {
+        let target = self.block_map[&address];
+        let val = JitCompiler::load_reg(self.builder, reg_base, value);
+        // Same logic as JumpIfTrue but inverted.
+        let bool_tag = self
+            .builder
+            .ins()
+            .iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
+        let mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+        let val_tag = self.builder.ins().band(val, mask);
+        let is_bool = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            val_tag,
+            bool_tag,
+        );
+        let fast_block = self.builder.create_block();
+        let slow_block = self.builder.create_block();
+        let cont_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_bool, fast_block, &[], slow_block, &[]);
+
+        self.builder.switch_to_block(fast_block);
+        let one = self.builder.ins().iconst(types::I64, 1);
+        let low_bit = self.builder.ins().band(val, one);
+        let zero64 = self.builder.ins().iconst(types::I64, 0);
+        let is_false = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            low_bit,
+            zero64,
+        );
+        // If false -> jump to target.
+        self.builder
+            .ins()
+            .brif(is_false, target, &[], cont_block, &[]);
+
+        self.builder.switch_to_block(slow_block);
+        // Check for integer 0 (falsy).
+        let int_tag_v = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_INT32 as i64);
+        let val_tag2 = self.builder.ins().band(val, mask);
+        let is_int = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            val_tag2,
+            int_tag_v,
+        );
+        let int_check_block = self.builder.create_block();
+        let very_slow = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_int, int_check_block, &[], very_slow, &[]);
+
+        self.builder.switch_to_block(int_check_block);
+        let val_i32 = self.builder.ins().ireduce(types::I32, val);
+        let zero_i32 = self.builder.ins().iconst(types::I32, 0);
+        let is_zero = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            val_i32,
+            zero_i32,
+        );
+        self.builder
+            .ins()
+            .brif(is_zero, target, &[], cont_block, &[]);
+
+        self.builder.switch_to_block(very_slow);
+        let undef = self
+            .builder
+            .ins()
+            .iconst(types::I64, 0x7FFB_0000_0000_0001_u64 as i64);
+        let null = self
+            .builder
+            .ins()
+            .iconst(types::I64, 0x7FFB_0000_0000_0000_u64 as i64);
+        let is_undef =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, undef);
+        let is_null =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, null);
+        let falsy = self.builder.ins().bor(is_undef, is_null);
+        self.builder.ins().brif(falsy, target, &[], cont_block, &[]);
+
+        self.builder.switch_to_block(cont_block);
+    }
+
+    fn lower_jump_if_not_less_than(&mut self, reg_base: Value, lhs: u32, rhs: u32, address: u32) {
+        let target = self.block_map[&address];
+
+        // Inline integer fast path.
+        let lhs_val = JitCompiler::load_reg(self.builder, reg_base, lhs);
+        let rhs_val = JitCompiler::load_reg(self.builder, reg_base, rhs);
+
+        let mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+        let int_tag = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_INT32 as i64);
+        let lhs_tag = self.builder.ins().band(lhs_val, mask);
+        let rhs_tag = self.builder.ins().band(rhs_val, mask);
+        let lhs_is_int = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            lhs_tag,
+            int_tag,
+        );
+        let rhs_is_int = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            rhs_tag,
+            int_tag,
+        );
+        let both_int = self.builder.ins().band(lhs_is_int, rhs_is_int);
+
+        let fast_block = self.builder.create_block();
+        let slow_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(both_int, fast_block, &[], slow_block, &[]);
+
+        // Fast path: compare as i32 (lower 32 bits).
+        self.builder.switch_to_block(fast_block);
+
+        let lhs_i32 = self.builder.ins().ireduce(types::I32, lhs_val);
+        let rhs_i32 = self.builder.ins().ireduce(types::I32, rhs_val);
+        let is_less = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
+            lhs_i32,
+            rhs_i32,
+        );
+        let fast_continue = self.builder.create_block();
+        // If lhs < rhs, don't jump (continue). Else jump to target.
+        self.builder
+            .ins()
+            .brif(is_less, fast_continue, &[], target, &[]);
+
+        // Slow path: call helper.
+        self.builder.switch_to_block(slow_block);
+
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        let result = self
+            .builder
+            .ins()
+            .call(self.refs.not_lt_ref, &[self.ctx_ptr, l, r]);
+        let tag = self.builder.inst_results(result)[0];
+
+        let two = self.builder.ins().iconst(types::I64, 2);
+        let is_error =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, tag, two);
+        let not_error = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_error, self.error_block, &[], not_error, &[]);
+
+        self.builder.switch_to_block(not_error);
+
+        let one = self.builder.ins().iconst(types::I64, 1);
+        let should_jump =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, tag, one);
+        self.builder
+            .ins()
+            .brif(should_jump, target, &[], fast_continue, &[]);
+
+        // Continue block after either path.
+        self.builder.switch_to_block(fast_continue);
+    }
+
+    fn lower_jump_if_not_less_than_or_equal(&mut self, lhs: u32, rhs: u32, address: u32) {
+        // Jump if !(lhs <= rhs). Inline integer fast path + helper slow path.
+        let target = self.block_map[&address];
+        let reg_base = self.builder.use_var(self.reg_base_var);
+        let lhs_off = (lhs as i32) * 8;
+        let rhs_off = (rhs as i32) * 8;
+        let lhs_val = self.builder.ins().load(
+            types::I64,
+            cranelift_codegen::ir::MemFlags::trusted(),
+            reg_base,
+            lhs_off,
+        );
+        let rhs_val = self.builder.ins().load(
+            types::I64,
+            cranelift_codegen::ir::MemFlags::trusted(),
+            reg_base,
+            rhs_off,
+        );
+        let mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+        let int_tag = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_INT32 as i64);
+        let lt = self.builder.ins().band(lhs_val, mask);
+        let rt = self.builder.ins().band(rhs_val, mask);
+        let li =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lt, int_tag);
+        let ri =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rt, int_tag);
+        let both = self.builder.ins().band(li, ri);
+        let fast_block = self.builder.create_block();
+        let slow_block = self.builder.create_block();
+        let cont_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(both, fast_block, &[], slow_block, &[]);
+
+        // Fast path: compare as i32.
+        self.builder.switch_to_block(fast_block);
+        let l32 = self.builder.ins().ireduce(types::I32, lhs_val);
+        let r32 = self.builder.ins().ireduce(types::I32, rhs_val);
+        let is_le = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
+            l32,
+            r32,
+        );
+        self.builder.ins().brif(is_le, cont_block, &[], target, &[]);
+
+        // Slow path: use le_ref helper with scratch register 0.
+        self.builder.switch_to_block(slow_block);
+        let scratch = self.i32const(0);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.le_ref,
+            &[self.ctx_ptr, scratch, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+        let reg_base2 = self.builder.use_var(self.reg_base_var);
+        let result = JitCompiler::load_reg(self.builder, reg_base2, 0);
+        let true_val = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::VALUE_TRUE as i64);
+        let is_true = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            result,
+            true_val,
+        );
+        self.builder
+            .ins()
+            .brif(is_true, cont_block, &[], target, &[]);
+
+        self.builder.switch_to_block(cont_block);
+    }
+
+    fn lower_jump_if_not_greater_than(&mut self, lhs: u32, rhs: u32, address: u32) {
+        // Same as JumpIfNotLessThan but with > instead of <.
+        // Jump if !(lhs > rhs), i.e. if lhs <= rhs.
+        let target = self.block_map[&address];
+        let reg_base = self.builder.use_var(self.reg_base_var);
+        let lhs_off = (lhs as i32) * 8;
+        let rhs_off = (rhs as i32) * 8;
+        let lhs_val = self.builder.ins().load(
+            types::I64,
+            cranelift_codegen::ir::MemFlags::trusted(),
+            reg_base,
+            lhs_off,
+        );
+        let rhs_val = self.builder.ins().load(
+            types::I64,
+            cranelift_codegen::ir::MemFlags::trusted(),
+            reg_base,
+            rhs_off,
+        );
+        let mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+        let int_tag = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_INT32 as i64);
+        let lt = self.builder.ins().band(lhs_val, mask);
+        let rt = self.builder.ins().band(rhs_val, mask);
+        let li =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lt, int_tag);
+        let ri =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, rt, int_tag);
+        let both = self.builder.ins().band(li, ri);
+        let fast_block = self.builder.create_block();
+        let slow_block = self.builder.create_block();
+        let cont_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(both, fast_block, &[], slow_block, &[]);
+        self.builder.switch_to_block(fast_block);
+        let l32 = self.builder.ins().ireduce(types::I32, lhs_val);
+        let r32 = self.builder.ins().ireduce(types::I32, rhs_val);
+        let is_gt = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
+            l32,
+            r32,
+        );
+        self.builder.ins().brif(is_gt, cont_block, &[], target, &[]);
+        self.builder.switch_to_block(slow_block);
+        // Slow: use gt helper then branch. Use register 0 as scratch for result.
+        let scratch = self.i32const(0);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.gt_ref,
+            &[self.ctx_ptr, scratch, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+        let reg_base2 = self.builder.use_var(self.reg_base_var);
+        let result = JitCompiler::load_reg(self.builder, reg_base2, 0);
+        let true_val = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::VALUE_TRUE as i64);
+        let is_true = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            result,
+            true_val,
+        );
+        self.builder
+            .ins()
+            .brif(is_true, cont_block, &[], target, &[]);
+        self.builder.switch_to_block(cont_block);
+    }
+
+    fn lower_jump_if_not_greater_than_or_equal(&mut self, lhs: u32, rhs: u32, address: u32) {
+        let target = self.block_map[&address];
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        // Write comparison result to register 0 (scratch) to avoid corrupting lhs.
+        let scratch = self.i32const(0);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.ge_ref,
+            &[self.ctx_ptr, scratch, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+        let reg_base2 = self.builder.use_var(self.reg_base_var);
+        let result = JitCompiler::load_reg(self.builder, reg_base2, 0);
+        let true_val = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::VALUE_TRUE as i64);
+        let is_true = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            result,
+            true_val,
+        );
+        let cont = self.builder.create_block();
+        self.builder.ins().brif(is_true, cont, &[], target, &[]);
+        self.builder.switch_to_block(cont);
+    }
+
+    fn lower_jump_if_not_equal(&mut self, lhs: u32, rhs: u32, address: u32) {
+        let target = self.block_map[&address];
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        let scratch = self.i32const(0);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.eq_ref,
+            &[self.ctx_ptr, scratch, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+        let reg_base2 = self.builder.use_var(self.reg_base_var);
+        let result = JitCompiler::load_reg(self.builder, reg_base2, 0);
+        let true_val = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::VALUE_TRUE as i64);
+        let is_true = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            result,
+            true_val,
+        );
+        let cont = self.builder.create_block();
+        self.builder.ins().brif(is_true, cont, &[], target, &[]);
+        self.builder.switch_to_block(cont);
+    }
+
+    fn lower_jump_if_null_or_undefined(&mut self, address: u32, value: u32) {
+        let target = self.block_map[&address];
+        let reg_base = self.builder.use_var(self.reg_base_var);
+        let val = JitCompiler::load_reg(self.builder, reg_base, value);
+        let null = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::VALUE_NULL as i64);
+        let undef = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::VALUE_UNDEFINED as i64);
+        let is_null =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, null);
+        let is_undef =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, undef);
+        let is_either = self.builder.ins().bor(is_null, is_undef);
+        let cont = self.builder.create_block();
+        self.builder.ins().brif(is_either, target, &[], cont, &[]);
+        self.builder.switch_to_block(cont);
+    }
+
+    fn lower_jump_if_not_undefined(&mut self, address: u32, value: u32) {
+        let target = self.block_map[&address];
+        let reg_base = self.builder.use_var(self.reg_base_var);
+        let val = JitCompiler::load_reg(self.builder, reg_base, value);
+        let undef = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::VALUE_UNDEFINED as i64);
+        let is_undef =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, undef);
+        let cont = self.builder.create_block();
+        self.builder.ins().brif(is_undef, cont, &[], target, &[]);
+        self.builder.switch_to_block(cont);
+    }
+
+    fn lower_case(&mut self, address: u32, value: u32, condition: u32) {
+        // StrictEq comparison + conditional jump.
+        let target = self.block_map[&address];
+        let reg_base = self.builder.use_var(self.reg_base_var);
+        let v = JitCompiler::load_reg(self.builder, reg_base, value);
+        let c = JitCompiler::load_reg(self.builder, reg_base, condition);
+        let is_eq = self
+            .builder
+            .ins()
+            .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, v, c);
+        let cont = self.builder.create_block();
+        self.builder.ins().brif(is_eq, target, &[], cont, &[]);
+        self.builder.switch_to_block(cont);
+    }
+
+    fn lower_logical_and(&mut self, reg_base: Value, address: u32, value: u32) {
+        // Identical to JumpIfFalse: if value is falsy, jump to address.
+        // The value stays in its register (short-circuit result).
+        let target = self.block_map[&address];
+        let val = JitCompiler::load_reg(self.builder, reg_base, value);
+
+        // Fast path: check for boolean false.
+        let bool_tag = self
+            .builder
+            .ins()
+            .iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
+        let mask = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+        let val_tag = self.builder.ins().band(val, mask);
+        let is_bool = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            val_tag,
+            bool_tag,
+        );
+        let fast_block = self.builder.create_block();
+        let slow_block = self.builder.create_block();
+        let cont_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_bool, fast_block, &[], slow_block, &[]);
+
+        self.builder.switch_to_block(fast_block);
+        let one = self.builder.ins().iconst(types::I64, 1);
+        let low_bit = self.builder.ins().band(val, one);
+        let zero64 = self.builder.ins().iconst(types::I64, 0);
+        let is_false = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            low_bit,
+            zero64,
+        );
+        self.builder
+            .ins()
+            .brif(is_false, target, &[], cont_block, &[]);
+
+        // Slow: check integer 0, undefined, null.
+        self.builder.switch_to_block(slow_block);
+        let int_tag_v = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_INT32 as i64);
+        let val_tag2 = self.builder.ins().band(val, mask);
+        let is_int = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            val_tag2,
+            int_tag_v,
+        );
+        let int_check = self.builder.create_block();
+        let very_slow = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_int, int_check, &[], very_slow, &[]);
+
+        self.builder.switch_to_block(int_check);
+        let val_i32 = self.builder.ins().ireduce(types::I32, val);
+        let zero_i32 = self.builder.ins().iconst(types::I32, 0);
+        let is_zero = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            val_i32,
+            zero_i32,
+        );
+        self.builder
+            .ins()
+            .brif(is_zero, target, &[], cont_block, &[]);
+
+        self.builder.switch_to_block(very_slow);
+        let undef = self
+            .builder
+            .ins()
+            .iconst(types::I64, 0x7FFB_0000_0000_0001_u64 as i64);
+        let null = self
+            .builder
+            .ins()
+            .iconst(types::I64, 0x7FFB_0000_0000_0000_u64 as i64);
+        let is_undef =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, undef);
+        let is_null =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, null);
+        let falsy = self.builder.ins().bor(is_undef, is_null);
+        self.builder.ins().brif(falsy, target, &[], cont_block, &[]);
+
+        self.builder.switch_to_block(cont_block);
+    }
+
+    fn lower_logical_or(&mut self, address: u32, value: u32) {
+        // If value is truthy, jump to address (short-circuit).
+        // Same as JumpIfTrue.
+        let target = self.block_map[&address];
+        let reg_base = self.builder.use_var(self.reg_base_var);
+        let val = JitCompiler::load_reg(self.builder, reg_base, value);
+        // Quick check: boolean true
+        let true_val = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::VALUE_TRUE as i64);
+        let is_true = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            val,
+            true_val,
+        );
+        let check_more = self.builder.create_block();
+        let cont = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_true, target, &[], check_more, &[]);
+        self.builder.switch_to_block(check_more);
+        // Not boolean true — check for falsy values (false, 0, null, undefined)
+        let false_val = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::VALUE_FALSE as i64);
+        let null_val = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::VALUE_NULL as i64);
+        let undef_val = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::VALUE_UNDEFINED as i64);
+        let int_zero = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::MASK_INT32 as i64);
+        let is_false = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            val,
+            false_val,
+        );
+        let is_null = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            val,
+            null_val,
+        );
+        let is_undef = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            val,
+            undef_val,
+        );
+        let is_zero = self.builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::Equal,
+            val,
+            int_zero,
+        );
+        let f1 = self.builder.ins().bor(is_false, is_null);
+        let f2 = self.builder.ins().bor(is_undef, is_zero);
+        let falsy = self.builder.ins().bor(f1, f2);
+        // If falsy -> don't jump (continue). If truthy -> jump.
+        self.builder.ins().brif(falsy, cont, &[], target, &[]);
+        self.builder.switch_to_block(cont);
+    }
+
+    fn lower_coalesce(&mut self, address: u32, value: u32) {
+        // Nullish coalescing: if value is NOT null/undefined, jump.
+        let target = self.block_map[&address];
+        let reg_base = self.builder.use_var(self.reg_base_var);
+        let val = JitCompiler::load_reg(self.builder, reg_base, value);
+        let null = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::VALUE_NULL as i64);
+        let undef = self
+            .builder
+            .ins()
+            .iconst(types::I64, JitCompiler::VALUE_UNDEFINED as i64);
+        let is_null =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, null);
+        let is_undef =
+            self.builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, val, undef);
+        let is_nullish = self.builder.ins().bor(is_null, is_undef);
+        let cont = self.builder.create_block();
+        // If nullish -> continue (evaluate right side). If not -> jump (use left).
+        self.builder.ins().brif(is_nullish, cont, &[], target, &[]);
+        self.builder.switch_to_block(cont);
+    }
+
+    fn lower_increment_loop_iteration(&mut self) {
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.inc_loop_ref,
+            &[self.ctx_ptr],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Variables / bindings
+    // -----------------------------------------------------------------------
+
+    fn lower_get_name(&mut self, dst: u32, binding_index: u32) {
+        let d = self.i32const(dst);
+        let b = self.i32const(binding_index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.get_name_ref,
+            &[self.ctx_ptr, d, b],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_get_name_global(&mut self, dst: u32, binding_index: u32, ic_index: u32) {
+        let d = self.i32const(dst);
+        let b = self.i32const(binding_index);
+        let ic = self.i32const(ic_index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.get_name_global_ref,
+            &[self.ctx_ptr, d, b, ic],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_get_name_or_undefined(&mut self, dst: u32, binding_index: u32) {
+        let d = self.i32const(dst);
+        let b = self.i32const(binding_index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.get_name_or_undef_ref,
+            &[self.ctx_ptr, d, b],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_get_name_and_locator(&mut self, dst: u32, binding_index: u32) {
+        let d = self.i32const(dst);
+        let b = self.i32const(binding_index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.get_name_and_loc_ref,
+            &[self.ctx_ptr, d, b],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_get_locator(&mut self, binding_index: u32) {
+        let b = self.i32const(binding_index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.get_locator_ref,
+            &[self.ctx_ptr, b],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_set_name(&mut self, src: u32, binding_index: u32) {
+        let s = self.i32const(src);
+        let b = self.i32const(binding_index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.set_name_ref,
+            &[self.ctx_ptr, s, b],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_set_name_by_locator(&mut self, src: u32) {
+        let s = self.i32const(src);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.set_name_by_loc_ref,
+            &[self.ctx_ptr, s],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_put_lexical_value(&mut self, src: u32, binding_index: u32) {
+        let s = self.i32const(src);
+        let b = self.i32const(binding_index);
+        self.builder
+            .ins()
+            .call(self.refs.put_lex_val_ref, &[self.ctx_ptr, s, b]);
+    }
+
+    fn lower_def_init_var(&mut self, src: u32, binding_index: u32) {
+        let s = self.i32const(src);
+        let b = self.i32const(binding_index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.def_init_var_ref,
+            &[self.ctx_ptr, s, b],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_delete_name(&mut self, dst: u32, binding_index: u32) {
+        let d = self.i32const(dst);
+        let b = self.i32const(binding_index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.delete_name_ref,
+            &[self.ctx_ptr, d, b],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_in(&mut self, dst: u32, lhs: u32, rhs: u32) {
+        let d = self.i32const(dst);
+        let l = self.i32const(lhs);
+        let r = self.i32const(rhs);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.in_ref,
+            &[self.ctx_ptr, d, l, r],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_to_property_key(&mut self, src: u32, dst: u32) {
+        let s = self.i32const(src);
+        let d = self.i32const(dst);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.to_prop_key_ref,
+            &[self.ctx_ptr, s, d],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Property access
+    // -----------------------------------------------------------------------
+
+    fn lower_get_property_by_name(&mut self, dst: u32, value: u32, ic_index: u32) {
+        // Try to inline the IC check at compile time.
+        let ic_idx = ic_index as usize;
+        let ic_entry = &self.code.ic[ic_idx];
+        let cached = ic_entry.entries.borrow();
+        let ic_data = cached.first().and_then(|e| {
+            use crate::object::shape::slot::SlotAttributes;
+            let shape = e.shape.upgrade()?;
+            if e.slot.attributes.contains(SlotAttributes::NOT_CACHEABLE)
+                || e.slot.attributes.contains(SlotAttributes::PROTOTYPE)
+                || e.slot.attributes.has_get()
+            {
+                return None;
+            }
+            // Compute the raw GcBox pointer from to_addr_usize.
+            let addr = shape.to_addr_usize();
+            let raw_gc_ptr = addr - helpers::gcbox_value_offset();
+            Some((raw_gc_ptr as u64, e.slot.index))
+        });
+        drop(cached);
+
+        if let Some((cached_shape_ptr, slot_idx)) = ic_data {
+            let reg_base = self.builder.use_var(self.reg_base_var);
+            let obj_val = JitCompiler::load_reg(self.builder, reg_base, value);
+
+            // Check that value is an object (tag == 0x7FFC).
+            let kind_mask = self
+                .builder
+                .ins()
+                .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+            let obj_tag = self
+                .builder
+                .ins()
+                .iconst(types::I64, JitCompiler::MASK_OBJECT as i64);
+            let val_tag = self.builder.ins().band(obj_val, kind_mask);
+            let is_obj = self.builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::Equal,
+                val_tag,
+                obj_tag,
+            );
+
+            let obj_block = self.builder.create_block();
+            let slow_block = self.builder.create_block();
+            let merge_block = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(is_obj, obj_block, &[], slow_block, &[]);
+
+            // Object confirmed. Extract pointer, check shape.
+            self.builder.switch_to_block(obj_block);
+            let ptr_mask = self
+                .builder
+                .ins()
+                .iconst(types::I64, 0x0000_FFFF_FFFF_FFFF_u64 as i64);
+            let obj_ptr = self.builder.ins().band(obj_val, ptr_mask);
+
+            // Load shape Gc pointer at computed offset.
+            let shape_val = self.builder.ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlags::trusted(),
+                obj_ptr,
+                self.ic_offsets.shape_ptr,
+            );
+            let cached = self
+                .builder
+                .ins()
+                .iconst(types::I64, cached_shape_ptr as i64);
+            let shape_match = self.builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::Equal,
+                shape_val,
+                cached,
+            );
+
+            let fast_block = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(shape_match, fast_block, &[], slow_block, &[]);
+
+            // IC hit! Load from storage[slot_idx].
+            self.builder.switch_to_block(fast_block);
+            let storage_data = self.builder.ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlags::trusted(),
+                obj_ptr,
+                self.ic_offsets.storage_ptr,
+            );
+            let slot_off = (slot_idx as i32) * 8;
+            let prop_val = self.builder.ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlags::trusted(),
+                storage_data,
+                slot_off,
+            );
+
+            // GC: clone if pointer type, drop old dst if pointer type.
+            let mask_k = self
+                .builder
+                .ins()
+                .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+            let ptr_thresh = self
+                .builder
+                .ins()
+                .iconst(types::I64, JitCompiler::MASK_OBJECT as i64);
+            let new_tag = self.builder.ins().band(prop_val, mask_k);
+            let new_is_ptr = self.builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                new_tag,
+                ptr_thresh,
+            );
+            let clone_blk = self.builder.create_block();
+            let after_clone = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(new_is_ptr, clone_blk, &[], after_clone, &[]);
+
+            self.builder.switch_to_block(clone_blk);
+            self.builder
+                .ins()
+                .call(self.refs.clone_val_ref, &[prop_val]);
+            self.builder.ins().jump(after_clone, &[]);
+
+            self.builder.switch_to_block(after_clone);
+            let old_dst = JitCompiler::load_reg(self.builder, reg_base, dst);
+            let old_tag = self.builder.ins().band(old_dst, mask_k);
+            let old_is_ptr = self.builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                old_tag,
+                ptr_thresh,
+            );
+            let drop_blk = self.builder.create_block();
+            let after_drop = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(old_is_ptr, drop_blk, &[], after_drop, &[]);
+
+            self.builder.switch_to_block(drop_blk);
+            self.builder.ins().call(self.refs.drop_val_ref, &[old_dst]);
+            self.builder.ins().jump(after_drop, &[]);
+
+            self.builder.switch_to_block(after_drop);
+            JitCompiler::store_reg(self.builder, reg_base, dst, prop_val);
+            self.builder.ins().jump(merge_block, &[]);
+
+            // Slow path.
+            self.builder.switch_to_block(slow_block);
+            let d = self.i32const(dst);
+            let o = self.i32const(value);
+            let ic = self.i32const(ic_index);
+            JitCompiler::emit_fallible_call(
+                self.builder,
+                self.refs.get_prop_name_ref,
+                &[self.ctx_ptr, d, o, ic],
+                self.error_block,
+                self.reg_base_var,
+                self.reg_base_slot,
+                self.ptr_type,
+            );
+            self.builder.ins().jump(merge_block, &[]);
+
+            self.builder.switch_to_block(merge_block);
+        } else {
+            let d = self.i32const(dst);
+            let o = self.i32const(value);
+            let ic = self.i32const(ic_index);
+            JitCompiler::emit_fallible_call(
+                self.builder,
+                self.refs.get_prop_name_ref,
+                &[self.ctx_ptr, d, o, ic],
+                self.error_block,
+                self.reg_base_var,
+                self.reg_base_slot,
+                self.ptr_type,
+            );
+        }
+    }
+
+    fn lower_set_property_by_name(&mut self, value: u32, object: u32, ic_index: u32) {
+        // Try to inline the IC check at compile time (same pattern as GetPropertyByName).
+        let ic_idx = ic_index as usize;
+        let ic_entry = &self.code.ic[ic_idx];
+        let cached = ic_entry.entries.borrow();
+        let ic_data = cached.first().and_then(|e| {
+            use crate::object::shape::slot::SlotAttributes;
+            let shape = e.shape.upgrade()?;
+            if e.slot.attributes.contains(SlotAttributes::NOT_CACHEABLE)
+                || e.slot.attributes.contains(SlotAttributes::PROTOTYPE)
+                || e.slot.attributes.is_accessor_descriptor()
+            {
+                return None;
+            }
+            let addr = shape.to_addr_usize();
+            let raw_gc_ptr = addr - helpers::gcbox_value_offset();
+            Some((raw_gc_ptr as u64, e.slot.index))
+        });
+        drop(cached);
+
+        if let Some((cached_shape_ptr, slot_idx)) = ic_data {
+            let reg_base = self.builder.use_var(self.reg_base_var);
+            let obj_val = JitCompiler::load_reg(self.builder, reg_base, object);
+
+            // Check that object is an object (tag == 0x7FFC).
+            let kind_mask = self
+                .builder
+                .ins()
+                .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+            let obj_tag_const = self
+                .builder
+                .ins()
+                .iconst(types::I64, JitCompiler::MASK_OBJECT as i64);
+            let val_tag = self.builder.ins().band(obj_val, kind_mask);
+            let is_obj = self.builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::Equal,
+                val_tag,
+                obj_tag_const,
+            );
+
+            let obj_block = self.builder.create_block();
+            let slow_block = self.builder.create_block();
+            let merge_block = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(is_obj, obj_block, &[], slow_block, &[]);
+
+            // Object confirmed. Extract pointer, check shape.
+            self.builder.switch_to_block(obj_block);
+            let ptr_mask = self
+                .builder
+                .ins()
+                .iconst(types::I64, 0x0000_FFFF_FFFF_FFFF_u64 as i64);
+            let obj_ptr = self.builder.ins().band(obj_val, ptr_mask);
+
+            let shape_val = self.builder.ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlags::trusted(),
+                obj_ptr,
+                self.ic_offsets.shape_ptr,
+            );
+            let cached_const = self
+                .builder
+                .ins()
+                .iconst(types::I64, cached_shape_ptr as i64);
+            let shape_match = self.builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::Equal,
+                shape_val,
+                cached_const,
+            );
+
+            let fast_block = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(shape_match, fast_block, &[], slow_block, &[]);
+
+            // IC hit! Store to storage[slot_idx].
+            self.builder.switch_to_block(fast_block);
+            let storage_data = self.builder.ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlags::trusted(),
+                obj_ptr,
+                self.ic_offsets.storage_ptr,
+            );
+            let slot_off = (slot_idx as i32) * 8;
+
+            // Load the new value and old value at the slot.
+            let reg_base2 = self.builder.use_var(self.reg_base_var);
+            let new_val = JitCompiler::load_reg(self.builder, reg_base2, value);
+            let old_val = self.builder.ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlags::trusted(),
+                storage_data,
+                slot_off,
+            );
+
+            // GC: clone new value if pointer type.
+            let mask_k = self
+                .builder
+                .ins()
+                .iconst(types::I64, JitCompiler::MASK_KIND as i64);
+            let ptr_thresh = self
+                .builder
+                .ins()
+                .iconst(types::I64, JitCompiler::MASK_OBJECT as i64);
+            let new_tag = self.builder.ins().band(new_val, mask_k);
+            let new_is_ptr = self.builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                new_tag,
+                ptr_thresh,
+            );
+            let clone_blk = self.builder.create_block();
+            let after_clone = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(new_is_ptr, clone_blk, &[], after_clone, &[]);
+
+            self.builder.switch_to_block(clone_blk);
+            self.builder.ins().call(self.refs.clone_val_ref, &[new_val]);
+            self.builder.ins().jump(after_clone, &[]);
+
+            // Write the new value to storage.
+            self.builder.switch_to_block(after_clone);
+            self.builder.ins().store(
+                cranelift_codegen::ir::MemFlags::trusted(),
+                new_val,
+                storage_data,
+                slot_off,
+            );
+
+            // GC: drop old value if pointer type.
+            let old_tag = self.builder.ins().band(old_val, mask_k);
+            let old_is_ptr = self.builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                old_tag,
+                ptr_thresh,
+            );
+            let drop_blk = self.builder.create_block();
+            let after_drop = self.builder.create_block();
+            self.builder
+                .ins()
+                .brif(old_is_ptr, drop_blk, &[], after_drop, &[]);
+
+            self.builder.switch_to_block(drop_blk);
+            self.builder.ins().call(self.refs.drop_val_ref, &[old_val]);
+            self.builder.ins().jump(after_drop, &[]);
+
+            self.builder.switch_to_block(after_drop);
+            self.builder.ins().jump(merge_block, &[]);
+
+            // Slow path.
+            self.builder.switch_to_block(slow_block);
+            let v = self.i32const(value);
+            let o = self.i32const(object);
+            let ic = self.i32const(ic_index);
+            JitCompiler::emit_fallible_call(
+                self.builder,
+                self.refs.set_prop_name_ref,
+                &[self.ctx_ptr, v, o, ic],
+                self.error_block,
+                self.reg_base_var,
+                self.reg_base_slot,
+                self.ptr_type,
+            );
+            self.builder.ins().jump(merge_block, &[]);
+
+            self.builder.switch_to_block(merge_block);
+        } else {
+            let v = self.i32const(value);
+            let o = self.i32const(object);
+            let ic = self.i32const(ic_index);
+            JitCompiler::emit_fallible_call(
+                self.builder,
+                self.refs.set_prop_name_ref,
+                &[self.ctx_ptr, v, o, ic],
+                self.error_block,
+                self.reg_base_var,
+                self.reg_base_slot,
+                self.ptr_type,
+            );
+        }
+    }
+
+    fn lower_get_property_by_name_with_this(
+        &mut self,
+        dst: u32,
+        receiver: u32,
+        value: u32,
+        ic_index: u32,
+    ) {
+        let d = self.i32const(dst);
+        let r = self.i32const(receiver);
+        let v = self.i32const(value);
+        let ic = self.i32const(ic_index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.get_prop_name_this_ref,
+            &[self.ctx_ptr, d, r, v, ic],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_get_length_property(&mut self, dst: u32, value: u32, ic_index: u32) {
+        let d = self.i32const(dst);
+        let v = self.i32const(value);
+        let ic = self.i32const(ic_index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.get_length_ref,
+            &[self.ctx_ptr, d, v, ic],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_get_property_by_value(&mut self, dst: u32, key: u32, receiver: u32, object: u32) {
+        let d = self.i32const(dst);
+        let k = self.i32const(key);
+        let r = self.i32const(receiver);
+        let o = self.i32const(object);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.get_prop_val_ref,
+            &[self.ctx_ptr, d, k, r, o],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_get_property_by_value_push(&mut self, dst: u32, key: u32, receiver: u32, object: u32) {
+        let d = self.i32const(dst);
+        let k = self.i32const(key);
+        let r = self.i32const(receiver);
+        let o = self.i32const(object);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.get_prop_val_push_ref,
+            &[self.ctx_ptr, d, k, r, o],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_set_property_by_value(&mut self, value: u32, key: u32, receiver: u32, object: u32) {
+        let v = self.i32const(value);
+        let k = self.i32const(key);
+        let r = self.i32const(receiver);
+        let o = self.i32const(object);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.set_prop_val_ref,
+            &[self.ctx_ptr, v, k, r, o],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_define_own_property_by_name(&mut self, object: u32, value: u32, name_index: u32) {
+        let o = self.i32const(object);
+        let v = self.i32const(value);
+        let n = self.i32const(name_index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.def_own_name_ref,
+            &[self.ctx_ptr, o, v, n],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_define_own_property_by_value(&mut self, value: u32, key: u32, object: u32) {
+        let v = self.i32const(value);
+        let k = self.i32const(key);
+        let o = self.i32const(object);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.def_own_val_ref,
+            &[self.ctx_ptr, v, k, o],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_delete_property_by_name(&mut self, object: u32, name_index: u32) {
+        let o = self.i32const(object);
+        let n = self.i32const(name_index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.del_prop_name_ref,
+            &[self.ctx_ptr, o, n],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_delete_property_by_value(&mut self, object: u32, key: u32) {
+        let o = self.i32const(object);
+        let k = self.i32const(key);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.del_prop_val_ref,
+            &[self.ctx_ptr, o, k],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_get_prototype(&mut self, object: u32) {
+        let o = self.i32const(object);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.get_proto_ref,
+            &[self.ctx_ptr, o],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_set_prototype(&mut self, object: u32, prototype: u32) {
+        let o = self.i32const(object);
+        let p = self.i32const(prototype);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.set_proto_ref,
+            &[self.ctx_ptr, o, p],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Object / array
+    // -----------------------------------------------------------------------
+
+    fn lower_store_literal(&mut self, dst: u32, index: u32) {
+        let d = self.i32const(dst);
+        let idx = self.i32const(index);
+        self.builder
+            .ins()
+            .call(self.refs.store_literal_ref, &[self.ctx_ptr, d, idx]);
+    }
+
+    fn lower_store_empty_object(&mut self, dst: u32) {
+        let d = self.i32const(dst);
+        self.builder
+            .ins()
+            .call(self.refs.store_empty_obj_ref, &[self.ctx_ptr, d]);
+    }
+
+    fn lower_store_new_array(&mut self, dst: u32) {
+        let d = self.i32const(dst);
+        self.builder
+            .ins()
+            .call(self.refs.store_new_arr_ref, &[self.ctx_ptr, d]);
+    }
+
+    fn lower_store_regexp(&mut self, dst: u32, pattern_index: u32, flags_index: u32) {
+        let d = self.i32const(dst);
+        let p = self.i32const(pattern_index);
+        let f = self.i32const(flags_index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.store_regexp_ref,
+            &[self.ctx_ptr, d, p, f],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_push_value_to_array(&mut self, value: u32, array: u32) {
+        let v = self.i32const(value);
+        let a = self.i32const(array);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.push_val_arr_ref,
+            &[self.ctx_ptr, v, a],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_push_elision_to_array(&mut self, array: u32) {
+        let a = self.i32const(array);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.push_elision_ref,
+            &[self.ctx_ptr, a],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Function
+    // -----------------------------------------------------------------------
+
+    fn lower_get_function(&mut self, dst: u32, index: u32) {
+        let d = self.i32const(dst);
+        let idx = self.i32const(index);
+        self.builder
+            .ins()
+            .call(self.refs.get_func_ref, &[self.ctx_ptr, d, idx]);
+    }
+
+    fn lower_call(&mut self, argument_count: u32) {
+        let ac = self.i32const(argument_count);
+        // Pass the address of the reg_base stack slot so jit_call
+        // can update it after the callee returns.
+        let slot_addr = self
+            .builder
+            .ins()
+            .stack_addr(self.ptr_type, self.reg_base_slot, 0);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.call_ref,
+            &[self.ctx_ptr, ac, slot_addr],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_new(&mut self, argument_count: u32) {
+        let ac = self.i32const(argument_count);
+        let slot_addr = self
+            .builder
+            .ins()
+            .stack_addr(self.ptr_type, self.reg_base_slot, 0);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.new_ref,
+            &[self.ctx_ptr, ac, slot_addr],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Scope
+    // -----------------------------------------------------------------------
+
+    fn lower_push_scope(&mut self, scope_index: u32) {
+        let s = self.i32const(scope_index);
+        self.builder
+            .ins()
+            .call(self.refs.push_scope_ref, &[self.ctx_ptr, s]);
+    }
+
+    fn lower_create_unmapped_arguments_object(&mut self, dst: u32) {
+        let d = self.i32const(dst);
+        self.builder
+            .ins()
+            .call(self.refs.create_unmapped_args_ref, &[self.ctx_ptr, d]);
+    }
+
+    fn lower_rest_parameter_init(&mut self, dst: u32) {
+        let d = self.i32const(dst);
+        self.builder
+            .ins()
+            .call(self.refs.rest_param_ref, &[self.ctx_ptr, d]);
+    }
+
+    fn lower_set_register_from_accumulator(&mut self, dst: u32) {
+        let d = self.i32const(dst);
+        self.builder
+            .ins()
+            .call(self.refs.set_reg_from_acc_ref, &[self.ctx_ptr, d]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Error
+    // -----------------------------------------------------------------------
+
+    fn lower_throw(&mut self, src: u32) {
+        let s = self.i32const(src);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.throw_ref,
+            &[self.ctx_ptr, s],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_throw_new_type_error(&mut self, message: u32) {
+        let m = self.i32const(message);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.throw_type_err_ref,
+            &[self.ctx_ptr, m],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_throw_new_reference_error(&mut self, message: u32) {
+        let m = self.i32const(message);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.throw_ref_err_ref,
+            &[self.ctx_ptr, m],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    fn lower_throw_mutate_immutable(&mut self, index: u32) {
+        let i = self.i32const(index);
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.throw_mutate_ref,
+            &[self.ctx_ptr, i],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Return
+    // -----------------------------------------------------------------------
+
+    fn lower_check_return(&mut self) {
+        // Call helper to handle constructor return value logic.
+        // For non-constructors this is a fast no-op (checks one flag).
+        JitCompiler::emit_fallible_call(
+            self.builder,
+            self.refs.check_return_ref,
+            &[self.ctx_ptr],
+            self.error_block,
+            self.reg_base_var,
+            self.reg_base_slot,
+            self.ptr_type,
+        );
+    }
+
+    /// Returns true (terminated).
+    fn lower_return(&mut self) -> bool {
+        let result = self.builder.ins().call(self.refs.ret_ref, &[self.ctx_ptr]);
+        let tag = self.builder.inst_results(result)[0];
+        self.builder.ins().return_(&[tag]);
+        true
+    }
+}
+
 impl JitCompiler {
     /// Create a new JIT compiler for the host architecture.
     pub(crate) fn new() -> Result<Self, String> {
@@ -971,7 +3796,7 @@ impl JitCompiler {
         reg_base_slot: cranelift_codegen::ir::StackSlot,
         code: &CodeBlock,
         bytecode: &crate::vm::opcode::Bytecode,
-        type_map: &std::collections::HashMap<u32, super::optimize::ValueType>,
+        type_map: &HashMap<u32, super::optimize::ValueType>,
         _entry_block: Block,
     ) {
         // Import all helper function references eagerly.
@@ -1099,12 +3924,107 @@ impl JitCompiler {
             }
         }
 
-        // We also need blocks for the instruction AFTER a conditional jump
-        // (the fall-through path). And for the instruction after the jump target
-        // when it's not already a block boundary.
-        // Actually, for conditional jumps, the fall-through is just the next
-        // instruction in the current block — we only need blocks where jumps
-        // LAND (forward or backward).
+        // Build the HelperRefs struct.
+        let refs = HelperRefs {
+            get_arg_ref,
+            set_acc_ref,
+            push_reg_ref,
+            pop_reg_ref,
+            add_ref,
+            sub_ref,
+            mul_ref,
+            div_ref,
+            mod_ref,
+            pow_ref,
+            bit_or_ref,
+            bit_and_ref,
+            bit_xor_ref,
+            shl_ref,
+            shr_ref,
+            ushr_ref,
+            inc_ref,
+            dec_ref,
+            strict_eq_ref,
+            strict_ne_ref,
+            eq_ref,
+            ne_ref,
+            lt_ref,
+            le_ref,
+            gt_ref,
+            ge_ref,
+            get_name_ref,
+            get_prop_name_ref,
+            get_length_ref,
+            get_prop_val_ref,
+            get_prop_val_push_ref,
+            set_prop_val_ref,
+            get_name_global_ref,
+            call_ref,
+            check_return_ref,
+            clone_val_ref,
+            drop_val_ref,
+            this_ref,
+            set_name_ref,
+            get_name_or_undef_ref,
+            get_name_and_loc_ref,
+            get_locator_ref,
+            set_name_by_loc_ref,
+            put_lex_val_ref,
+            def_init_var_ref,
+            delete_name_ref,
+            set_prop_name_ref,
+            get_prop_name_this_ref,
+            def_own_name_ref,
+            def_own_val_ref,
+            del_prop_name_ref,
+            del_prop_val_ref,
+            to_prop_key_ref,
+            in_ref,
+            get_proto_ref,
+            set_proto_ref,
+            store_literal_ref,
+            store_empty_obj_ref,
+            store_new_arr_ref,
+            store_regexp_ref,
+            push_val_arr_ref,
+            push_elision_ref,
+            push_scope_ref,
+            create_unmapped_args_ref,
+            rest_param_ref,
+            throw_type_err_ref,
+            throw_ref_err_ref,
+            throw_mutate_ref,
+            set_reg_from_acc_ref,
+            neg_ref,
+            pos_ref,
+            bit_not_ref,
+            logical_not_ref,
+            type_of_ref,
+            is_object_ref,
+            instance_of_ref,
+            vnnou_ref,
+            throw_ref,
+            get_func_ref,
+            new_ref,
+            inc_loop_ref,
+            not_lt_ref,
+            ret_ref,
+        };
+
+        // Build LoweringContext.
+        let mut lctx = LoweringContext {
+            builder,
+            ctx_ptr,
+            reg_base_var,
+            reg_base_slot,
+            error_block,
+            block_map: &block_map,
+            ptr_type: self.ptr_type,
+            type_map,
+            code,
+            ic_offsets: &self.ic_offsets,
+            refs,
+        };
 
         // Phase 2: Emit code. When we reach a PC that's a jump target,
         // transition to its block.
@@ -1116,9 +4036,9 @@ impl JitCompiler {
             if let Some(&target_block) = block_map.get(&(pc as u32)) {
                 if !terminated {
                     // Fall through from previous block.
-                    builder.ins().jump(target_block, &[]);
+                    lctx.builder.ins().jump(target_block, &[]);
                 }
-                builder.switch_to_block(target_block);
+                lctx.builder.switch_to_block(target_block);
                 terminated = false;
             }
 
@@ -1129,1860 +4049,342 @@ impl JitCompiler {
             // Read reg_base from the Cranelift Variable. This is a zero-cost
             // SSA operation — Cranelift just returns the current SSA value.
             // At loop headers, Cranelift inserts phi nodes automatically.
-            let reg_base = builder.use_var(reg_base_var);
-
-            let i32const = |builder: &mut FunctionBuilder<'_>, val: u32| -> Value {
-                builder.ins().iconst(types::I32, i64::from(val))
-            };
+            let reg_base = lctx.builder.use_var(reg_base_var);
 
             match instruction {
+                // --- Constants ---
                 Instruction::StoreZero { dst } => {
-                    let tagged = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_zero(reg_base, u32::from(dst));
                 }
                 Instruction::StoreOne { dst } => {
-                    let tagged = builder
-                        .ins()
-                        .iconst(types::I64, (Self::MASK_INT32 | 1) as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_one(reg_base, u32::from(dst));
                 }
                 Instruction::StoreInt8 { dst, value } => {
-                    let tagged_val = Self::MASK_INT32 | (u64::from(value as u32) & 0xFFFF_FFFF);
-                    let tagged = builder.ins().iconst(types::I64, tagged_val as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_int8(reg_base, u32::from(dst), value);
                 }
                 Instruction::StoreInt16 { dst, value } => {
-                    let tagged_val = Self::MASK_INT32 | (u64::from(value as u32) & 0xFFFF_FFFF);
-                    let tagged = builder.ins().iconst(types::I64, tagged_val as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_int16(reg_base, u32::from(dst), value);
                 }
                 Instruction::StoreInt32 { dst, value } => {
-                    let tagged_val = Self::MASK_INT32 | (u64::from(value as u32) & 0xFFFF_FFFF);
-                    let tagged = builder.ins().iconst(types::I64, tagged_val as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_int32(reg_base, u32::from(dst), value);
                 }
                 Instruction::StoreFloat { dst, value } => {
-                    let bits = f64::from(value).to_bits();
-                    let tagged = builder.ins().iconst(types::I64, bits as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_float(reg_base, u32::from(dst), value);
                 }
                 Instruction::StoreDouble { dst, value } => {
-                    let bits = value.to_bits();
-                    let tagged = builder.ins().iconst(types::I64, bits as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_double(reg_base, u32::from(dst), value);
                 }
                 Instruction::StoreNan { dst } => {
-                    let tagged = builder.ins().iconst(types::I64, Self::VALUE_NAN as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_nan(reg_base, u32::from(dst));
                 }
                 Instruction::StorePositiveInfinity { dst } => {
-                    let tagged = builder.ins().iconst(types::I64, Self::VALUE_POS_INF as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_positive_infinity(reg_base, u32::from(dst));
                 }
                 Instruction::StoreNegativeInfinity { dst } => {
-                    let tagged = builder.ins().iconst(types::I64, Self::VALUE_NEG_INF as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_negative_infinity(reg_base, u32::from(dst));
                 }
                 Instruction::StoreNull { dst } => {
-                    let tagged = builder.ins().iconst(types::I64, Self::VALUE_NULL as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_null(reg_base, u32::from(dst));
                 }
                 Instruction::StoreTrue { dst } => {
-                    let tagged = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_true(reg_base, u32::from(dst));
                 }
                 Instruction::StoreFalse { dst } => {
-                    let tagged = builder.ins().iconst(types::I64, Self::VALUE_FALSE as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_false(reg_base, u32::from(dst));
                 }
                 Instruction::StoreUndefined { dst } => {
-                    let tagged = builder
-                        .ins()
-                        .iconst(types::I64, Self::VALUE_UNDEFINED as i64);
-                    let off = (u32::from(dst) as i32) * 8;
-                    builder.ins().store(
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        tagged,
-                        reg_base,
-                        off,
-                    );
+                    lctx.lower_store_undefined(reg_base, u32::from(dst));
                 }
+
+                // --- Data movement ---
                 Instruction::This { dst } => {
-                    let d = i32const(builder, u32::from(dst));
-                    builder.ins().call(this_ref, &[ctx_ptr, d]);
+                    lctx.lower_this(u32::from(dst));
                 }
                 Instruction::GetArgument { index, dst } => {
-                    let idx = i32const(builder, u32::from(index));
-                    let d = i32const(builder, u32::from(dst));
-                    builder.ins().call(get_arg_ref, &[ctx_ptr, idx, d]);
+                    lctx.lower_get_argument(u32::from(index), u32::from(dst));
                 }
                 Instruction::Move { dst, src } => {
-                    // GC-safe Move: raw u64 copy + refcount management for pointer types.
-                    // Optimized: single check — if EITHER value is a pointer type,
-                    // branch to the slow path. Common case (both primitives) is one
-                    // OR + one compare + one branch-not-taken.
-                    let old_dst = Self::load_reg(builder, reg_base, u32::from(dst));
-                    let new_val = Self::load_reg(builder, reg_base, u32::from(src));
-                    Self::store_reg(builder, reg_base, u32::from(dst), new_val);
-
-                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                    let ptr_threshold = builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
-
-                    // OR the tags — if either is a pointer type, the result will be >= MASK_OBJECT.
-                    let new_tag = builder.ins().band(new_val, mask);
-                    let old_tag = builder.ins().band(old_dst, mask);
-                    let either_tag = builder.ins().bor(new_tag, old_tag);
-                    let either_is_ptr = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
-                        either_tag,
-                        ptr_threshold,
-                    );
-
-                    let gc_block = builder.create_block();
-                    let after_gc = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(either_is_ptr, gc_block, &[], after_gc, &[]);
-
-                    // Slow path: handle clone/drop individually.
-                    builder.switch_to_block(gc_block);
-                    let new_is_ptr = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
-                        new_tag,
-                        ptr_threshold,
-                    );
-                    let clone_block = builder.create_block();
-                    let check_drop = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(new_is_ptr, clone_block, &[], check_drop, &[]);
-
-                    builder.switch_to_block(clone_block);
-                    builder.ins().call(clone_val_ref, &[new_val]);
-                    builder.ins().jump(check_drop, &[]);
-
-                    builder.switch_to_block(check_drop);
-                    let old_is_ptr = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
-                        old_tag,
-                        ptr_threshold,
-                    );
-                    let drop_block = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(old_is_ptr, drop_block, &[], after_gc, &[]);
-
-                    builder.switch_to_block(drop_block);
-                    builder.ins().call(drop_val_ref, &[old_dst]);
-                    builder.ins().jump(after_gc, &[]);
-
-                    builder.switch_to_block(after_gc);
+                    lctx.lower_move(reg_base, u32::from(dst), u32::from(src));
                 }
                 Instruction::SetAccumulator { src } => {
-                    let s = i32const(builder, u32::from(src));
-                    builder.ins().call(set_acc_ref, &[ctx_ptr, s]);
+                    lctx.lower_set_accumulator(u32::from(src));
                 }
                 Instruction::PushFromRegister { src } => {
-                    let s = i32const(builder, u32::from(src));
-                    builder.ins().call(push_reg_ref, &[ctx_ptr, s]);
+                    lctx.lower_push_from_register(u32::from(src));
                 }
                 Instruction::PopIntoRegister { dst } => {
-                    let d = i32const(builder, u32::from(dst));
-                    builder.ins().call(pop_reg_ref, &[ctx_ptr, d]);
+                    lctx.lower_pop_into_register(u32::from(dst));
                 }
                 Instruction::Pop => {
-                    // Pop discards the top value from the stack.
-                    // In JIT context this happens after Call results that are unused.
-                    // PopIntoRegister with a temp register works but wastes a register.
-                    // Just call stack.pop() via a trivial inline — but we can't call
-                    // Rust methods from IR. Use pop_into_register to register 0
-                    // (the undefined register) as a discard target.
-                    let d = i32const(builder, 0);
-                    builder.ins().call(pop_reg_ref, &[ctx_ptr, d]);
+                    lctx.lower_pop();
                 }
-                // SetRegisterFromAccumulator is handled below (near other register ops)
+
+                // --- Arithmetic ---
                 Instruction::Add { dst, lhs, rhs } => {
-                    let known_int = type_map
-                        .get(&(pc as u32))
-                        .is_some_and(|t| *t == super::optimize::ValueType::Int32);
-                    Self::emit_inlined_add(
-                        builder,
-                        ctx_ptr,
-                        reg_base,
-                        reg_base_var,
-                        reg_base_slot,
-                        u32::from(dst),
-                        u32::from(lhs),
-                        u32::from(rhs),
-                        add_ref,
-                        error_block,
-                        known_int,
-                    );
+                    lctx.lower_add(reg_base, pc, u32::from(dst), u32::from(lhs), u32::from(rhs));
                 }
                 Instruction::Sub { dst, lhs, rhs } => {
-                    let known_int = type_map
-                        .get(&(pc as u32))
-                        .is_some_and(|t| *t == super::optimize::ValueType::Int32);
-                    self.emit_inlined_int_binop(
-                        builder,
-                        ctx_ptr,
+                    lctx.lower_sub(
+                        self,
                         reg_base,
-                        reg_base_var,
-                        reg_base_slot,
+                        pc,
                         u32::from(dst),
                         u32::from(lhs),
                         u32::from(rhs),
-                        IntBinOp::Sub,
-                        sub_ref,
-                        error_block,
-                        known_int,
                     );
                 }
                 Instruction::Mul { dst, lhs, rhs } => {
-                    let known_int = type_map
-                        .get(&(pc as u32))
-                        .is_some_and(|t| *t == super::optimize::ValueType::Int32);
-                    self.emit_inlined_int_binop(
-                        builder,
-                        ctx_ptr,
+                    lctx.lower_mul(
+                        self,
                         reg_base,
-                        reg_base_var,
-                        reg_base_slot,
+                        pc,
                         u32::from(dst),
                         u32::from(lhs),
                         u32::from(rhs),
-                        IntBinOp::Mul,
-                        mul_ref,
-                        error_block,
-                        known_int,
                     );
                 }
                 Instruction::Div { dst, lhs, rhs } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        div_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+                    lctx.lower_div(u32::from(dst), u32::from(lhs), u32::from(rhs));
                 }
                 Instruction::Mod { dst, lhs, rhs } => {
-                    // Inline integer fast path for `%`.
-                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
-                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
-                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let lt = builder.ins().band(lhs_val, mask);
-                    let rt = builder.ins().band(rhs_val, mask);
-                    let li = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        lt,
-                        int_tag,
-                    );
-                    let ri = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        rt,
-                        int_tag,
-                    );
-                    let both = builder.ins().band(li, ri);
-
-                    let fast_block = builder.create_block();
-                    let slow_block = builder.create_block();
-                    let merge_block = builder.create_block();
-                    builder.ins().brif(both, fast_block, &[], slow_block, &[]);
-
-                    builder.switch_to_block(fast_block);
-                    let lhs_i32 = builder.ins().ireduce(types::I32, lhs_val);
-                    let rhs_i32 = builder.ins().ireduce(types::I32, rhs_val);
-                    // Check for rhs == 0 (division by zero → slow path).
-                    let zero_i32 = builder.ins().iconst(types::I32, 0);
-                    let rhs_nonzero = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-                        rhs_i32,
-                        zero_i32,
-                    );
-                    let rem_block = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(rhs_nonzero, rem_block, &[], slow_block, &[]);
-
-                    builder.switch_to_block(rem_block);
-                    // Also check for MIN % -1 overflow.
-                    let min_val = builder.ins().iconst(types::I32, i64::from(i32::MIN));
-                    let neg_one = builder.ins().iconst(types::I32, -1_i64);
-                    let is_min = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        lhs_i32,
-                        min_val,
-                    );
-                    let is_neg1 = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        rhs_i32,
-                        neg_one,
-                    );
-                    let is_overflow = builder.ins().band(is_min, is_neg1);
-                    let safe_block = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(is_overflow, slow_block, &[], safe_block, &[]);
-
-                    builder.switch_to_block(safe_block);
-                    let result = builder.ins().srem(lhs_i32, rhs_i32);
-                    let result_u64 = builder.ins().uextend(types::I64, result);
-                    let mask32 = builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
-                    let result_masked = builder.ins().band(result_u64, mask32);
-                    let result_tagged = builder.ins().bor(result_masked, int_tag);
-                    Self::store_reg(builder, reg_base, u32::from(dst), result_tagged);
-                    builder.ins().jump(merge_block, &[]);
-
-                    builder.switch_to_block(slow_block);
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        mod_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                    builder.ins().jump(merge_block, &[]);
-
-                    builder.switch_to_block(merge_block);
+                    lctx.lower_mod(reg_base, u32::from(dst), u32::from(lhs), u32::from(rhs));
                 }
                 Instruction::Pow { dst, lhs, rhs } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        pow_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+                    lctx.lower_pow(u32::from(dst), u32::from(lhs), u32::from(rhs));
                 }
+                Instruction::Neg { value } => {
+                    lctx.lower_neg(u32::from(value));
+                }
+                Instruction::Pos { value } => {
+                    lctx.lower_pos(u32::from(value));
+                }
+                Instruction::Inc { dst, src } => {
+                    lctx.lower_inc(reg_base, u32::from(dst), u32::from(src));
+                }
+                Instruction::Dec { dst, src } => {
+                    lctx.lower_dec(reg_base, u32::from(dst), u32::from(src));
+                }
+
+                // --- Bitwise ---
                 Instruction::BitOr { dst, lhs, rhs } => {
-                    // Inline integer fast path for `|`.
-                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
-                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
-                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let lhs_tag = builder.ins().band(lhs_val, mask);
-                    let rhs_tag = builder.ins().band(rhs_val, mask);
-                    let lhs_is_int = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        lhs_tag,
-                        int_tag,
-                    );
-                    let rhs_is_int = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        rhs_tag,
-                        int_tag,
-                    );
-                    let both_int = builder.ins().band(lhs_is_int, rhs_is_int);
-
-                    let fast_block = builder.create_block();
-                    let slow_block = builder.create_block();
-                    let merge_block = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(both_int, fast_block, &[], slow_block, &[]);
-
-                    // Fast: i32 bitwise OR, always succeeds (no overflow possible).
-                    builder.switch_to_block(fast_block);
-
-                    let lhs_i32 = builder.ins().ireduce(types::I32, lhs_val);
-                    let rhs_i32 = builder.ins().ireduce(types::I32, rhs_val);
-                    let result = builder.ins().bor(lhs_i32, rhs_i32);
-                    let result_u64 = builder.ins().uextend(types::I64, result);
-                    let mask32 = builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
-                    let result_masked = builder.ins().band(result_u64, mask32);
-                    let result_tagged = builder.ins().bor(result_masked, int_tag);
-                    Self::store_reg(builder, reg_base, u32::from(dst), result_tagged);
-                    builder.ins().jump(merge_block, &[]);
-
-                    // Slow path.
-                    builder.switch_to_block(slow_block);
-
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        bit_or_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                    builder.ins().jump(merge_block, &[]);
-
-                    builder.switch_to_block(merge_block);
+                    lctx.lower_bit_or(reg_base, u32::from(dst), u32::from(lhs), u32::from(rhs));
                 }
                 Instruction::BitAnd { dst, lhs, rhs } => {
-                    self.emit_inlined_int_bitop(
-                        builder,
-                        ctx_ptr,
+                    lctx.lower_bit_and(
+                        self,
                         reg_base,
-                        reg_base_var,
-                        reg_base_slot,
                         u32::from(dst),
                         u32::from(lhs),
                         u32::from(rhs),
-                        IntBitOp::And,
-                        bit_and_ref,
-                        error_block,
                     );
                 }
                 Instruction::BitXor { dst, lhs, rhs } => {
-                    self.emit_inlined_int_bitop(
-                        builder,
-                        ctx_ptr,
+                    lctx.lower_bit_xor(
+                        self,
                         reg_base,
-                        reg_base_var,
-                        reg_base_slot,
                         u32::from(dst),
                         u32::from(lhs),
                         u32::from(rhs),
-                        IntBitOp::Xor,
-                        bit_xor_ref,
-                        error_block,
-                    );
-                }
-                Instruction::ShiftLeft { dst, lhs, rhs } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        shl_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::ShiftRight { dst, lhs, rhs } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        shr_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::UnsignedShiftRight { dst, lhs, rhs } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        ushr_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::StrictEq { dst, lhs, rhs } => {
-                    // Inline: for integers, strict_equals is just u64 comparison.
-                    // For non-integers (objects, strings), we need the helper.
-                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
-                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
-                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let lt = builder.ins().band(lhs_val, mask);
-                    let rt = builder.ins().band(rhs_val, mask);
-                    let li = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        lt,
-                        int_tag,
-                    );
-                    let ri = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        rt,
-                        int_tag,
-                    );
-                    let both = builder.ins().band(li, ri);
-
-                    let fast_block = builder.create_block();
-                    let slow_block = builder.create_block();
-                    let merge_block = builder.create_block();
-                    builder.ins().brif(both, fast_block, &[], slow_block, &[]);
-
-                    // Fast: compare the full u64 values.
-                    builder.switch_to_block(fast_block);
-                    let is_eq = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        lhs_val,
-                        rhs_val,
-                    );
-                    // Boolean true = 0x7FFA_0000_0000_0001, false = 0x7FFA_0000_0000_0000
-                    let bool_false = builder
-                        .ins()
-                        .iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
-                    let _one = builder.ins().iconst(types::I64, 1);
-                    let ext = builder.ins().uextend(types::I64, is_eq);
-                    let result = builder.ins().bor(bool_false, ext);
-                    Self::store_reg(builder, reg_base, u32::from(dst), result);
-                    builder.ins().jump(merge_block, &[]);
-
-                    // Slow: call helper for non-integer types.
-                    builder.switch_to_block(slow_block);
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    builder.ins().call(strict_eq_ref, &[ctx_ptr, d, l, r]);
-                    builder.ins().jump(merge_block, &[]);
-
-                    builder.switch_to_block(merge_block);
-                }
-                Instruction::StrictNotEq { dst, lhs, rhs } => {
-                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
-                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
-                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let lt = builder.ins().band(lhs_val, mask);
-                    let rt = builder.ins().band(rhs_val, mask);
-                    let li = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        lt,
-                        int_tag,
-                    );
-                    let ri = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        rt,
-                        int_tag,
-                    );
-                    let both = builder.ins().band(li, ri);
-
-                    let fast_block = builder.create_block();
-                    let slow_block = builder.create_block();
-                    let merge_block = builder.create_block();
-                    builder.ins().brif(both, fast_block, &[], slow_block, &[]);
-
-                    builder.switch_to_block(fast_block);
-                    let is_ne = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-                        lhs_val,
-                        rhs_val,
-                    );
-                    let bool_false = builder
-                        .ins()
-                        .iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
-                    let ext = builder.ins().uextend(types::I64, is_ne);
-                    let result = builder.ins().bor(bool_false, ext);
-                    Self::store_reg(builder, reg_base, u32::from(dst), result);
-                    builder.ins().jump(merge_block, &[]);
-
-                    builder.switch_to_block(slow_block);
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    builder.ins().call(strict_ne_ref, &[ctx_ptr, d, l, r]);
-                    builder.ins().jump(merge_block, &[]);
-
-                    builder.switch_to_block(merge_block);
-                }
-                Instruction::Eq { dst, lhs, rhs } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        eq_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::NotEq { dst, lhs, rhs } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        ne_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::GreaterThan { dst, lhs, rhs } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        gt_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::GreaterThanOrEq { dst, lhs, rhs } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        ge_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::LessThan { dst, lhs, rhs } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        lt_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::LessThanOrEq { dst, lhs, rhs } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        le_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::InstanceOf { dst, lhs, rhs } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        instance_of_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::Neg { value } => {
-                    let v = i32const(builder, u32::from(value));
-                    Self::emit_fallible_call(
-                        builder,
-                        neg_ref,
-                        &[ctx_ptr, v],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::Pos { value } => {
-                    let v = i32const(builder, u32::from(value));
-                    Self::emit_fallible_call(
-                        builder,
-                        pos_ref,
-                        &[ctx_ptr, v],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
                     );
                 }
                 Instruction::BitNot { value } => {
-                    let v = i32const(builder, u32::from(value));
-                    Self::emit_fallible_call(
-                        builder,
-                        bit_not_ref,
-                        &[ctx_ptr, v],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
+                    lctx.lower_bit_not(u32::from(value));
+                }
+                Instruction::ShiftLeft { dst, lhs, rhs } => {
+                    lctx.lower_shift_left(u32::from(dst), u32::from(lhs), u32::from(rhs));
+                }
+                Instruction::ShiftRight { dst, lhs, rhs } => {
+                    lctx.lower_shift_right(u32::from(dst), u32::from(lhs), u32::from(rhs));
+                }
+                Instruction::UnsignedShiftRight { dst, lhs, rhs } => {
+                    lctx.lower_unsigned_shift_right(u32::from(dst), u32::from(lhs), u32::from(rhs));
+                }
+
+                // --- Comparison ---
+                Instruction::StrictEq { dst, lhs, rhs } => {
+                    lctx.lower_strict_eq(reg_base, u32::from(dst), u32::from(lhs), u32::from(rhs));
+                }
+                Instruction::StrictNotEq { dst, lhs, rhs } => {
+                    lctx.lower_strict_not_eq(
+                        reg_base,
+                        u32::from(dst),
+                        u32::from(lhs),
+                        u32::from(rhs),
                     );
                 }
-                Instruction::LogicalNot { value } => {
-                    let v = i32const(builder, u32::from(value));
-                    builder.ins().call(logical_not_ref, &[ctx_ptr, v]);
+                Instruction::Eq { dst, lhs, rhs } => {
+                    lctx.lower_eq(u32::from(dst), u32::from(lhs), u32::from(rhs));
                 }
+                Instruction::NotEq { dst, lhs, rhs } => {
+                    lctx.lower_not_eq(u32::from(dst), u32::from(lhs), u32::from(rhs));
+                }
+                Instruction::GreaterThan { dst, lhs, rhs } => {
+                    lctx.lower_greater_than(u32::from(dst), u32::from(lhs), u32::from(rhs));
+                }
+                Instruction::GreaterThanOrEq { dst, lhs, rhs } => {
+                    lctx.lower_greater_than_or_eq(u32::from(dst), u32::from(lhs), u32::from(rhs));
+                }
+                Instruction::LessThan { dst, lhs, rhs } => {
+                    lctx.lower_less_than(u32::from(dst), u32::from(lhs), u32::from(rhs));
+                }
+                Instruction::LessThanOrEq { dst, lhs, rhs } => {
+                    lctx.lower_less_than_or_eq(u32::from(dst), u32::from(lhs), u32::from(rhs));
+                }
+                Instruction::InstanceOf { dst, lhs, rhs } => {
+                    lctx.lower_instance_of(u32::from(dst), u32::from(lhs), u32::from(rhs));
+                }
+
+                // --- Type checks ---
                 Instruction::TypeOf { value } => {
-                    let v = i32const(builder, u32::from(value));
-                    builder.ins().call(type_of_ref, &[ctx_ptr, v]);
+                    lctx.lower_type_of(u32::from(value));
                 }
                 Instruction::IsObject { value } => {
-                    let v = i32const(builder, u32::from(value));
-                    builder.ins().call(is_object_ref, &[ctx_ptr, v]);
+                    lctx.lower_is_object(u32::from(value));
                 }
                 Instruction::ValueNotNullOrUndefined { src } => {
-                    let v = i32const(builder, u32::from(src));
-                    Self::emit_fallible_call(
-                        builder,
-                        vnnou_ref,
-                        &[ctx_ptr, v],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+                    lctx.lower_value_not_null_or_undefined(u32::from(src));
                 }
-                Instruction::Inc { dst, src } => {
-                    // Inline integer fast path for i++ (most common case).
-                    let src_val = Self::load_reg(builder, reg_base, u32::from(src));
-                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let src_tag = builder.ins().band(src_val, mask);
-                    let is_int = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        src_tag,
-                        int_tag,
-                    );
-
-                    let fast_block = builder.create_block();
-                    let slow_block = builder.create_block();
-                    let merge_block = builder.create_block();
-                    builder.ins().brif(is_int, fast_block, &[], slow_block, &[]);
-
-                    // Fast path: extract i32, check < MAX, increment, store both.
-                    builder.switch_to_block(fast_block);
-
-                    let src_i32 = builder.ins().ireduce(types::I32, src_val);
-                    let max_val = builder.ins().iconst(types::I32, i64::from(i32::MAX));
-                    let not_max = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
-                        src_i32,
-                        max_val,
-                    );
-
-                    let inc_block = builder.create_block();
-                    builder.ins().brif(not_max, inc_block, &[], slow_block, &[]);
-
-                    builder.switch_to_block(inc_block);
-
-                    let one_i32 = builder.ins().iconst(types::I32, 1);
-                    let incremented = builder.ins().iadd(src_i32, one_i32);
-                    // Tag the incremented value.
-                    let inc_u64 = builder.ins().uextend(types::I64, incremented);
-                    let mask32 = builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
-                    let inc_masked = builder.ins().band(inc_u64, mask32);
-                    let inc_tagged = builder.ins().bor(inc_masked, int_tag);
-                    // Inc writes original to src, incremented to dst.
-                    Self::store_reg(builder, reg_base, u32::from(src), src_val);
-                    Self::store_reg(builder, reg_base, u32::from(dst), inc_tagged);
-                    builder.ins().jump(merge_block, &[]);
-
-                    // Slow path.
-                    builder.switch_to_block(slow_block);
-
-                    let d = i32const(builder, u32::from(dst));
-                    let s = i32const(builder, u32::from(src));
-                    Self::emit_fallible_call(
-                        builder,
-                        inc_ref,
-                        &[ctx_ptr, d, s],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                    builder.ins().jump(merge_block, &[]);
-
-                    builder.switch_to_block(merge_block);
+                Instruction::LogicalNot { value } => {
+                    lctx.lower_logical_not(u32::from(value));
                 }
-                Instruction::Dec { dst, src } => {
-                    // Inline integer fast path for i-- (same pattern as Inc).
-                    let src_val = Self::load_reg(builder, reg_base, u32::from(src));
-                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let src_tag = builder.ins().band(src_val, mask);
-                    let is_int = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        src_tag,
-                        int_tag,
-                    );
 
-                    let fast_block = builder.create_block();
-                    let slow_block = builder.create_block();
-                    let merge_block = builder.create_block();
-                    builder.ins().brif(is_int, fast_block, &[], slow_block, &[]);
-
-                    builder.switch_to_block(fast_block);
-                    let src_i32 = builder.ins().ireduce(types::I32, src_val);
-                    let min_val = builder.ins().iconst(types::I32, i64::from(i32::MIN));
-                    let not_min = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
-                        src_i32,
-                        min_val,
-                    );
-                    let dec_block = builder.create_block();
-                    builder.ins().brif(not_min, dec_block, &[], slow_block, &[]);
-
-                    builder.switch_to_block(dec_block);
-                    let one_i32 = builder.ins().iconst(types::I32, 1);
-                    let decremented = builder.ins().isub(src_i32, one_i32);
-                    let dec_u64 = builder.ins().uextend(types::I64, decremented);
-                    let mask32 = builder.ins().iconst(types::I64, 0xFFFF_FFFF_i64);
-                    let dec_masked = builder.ins().band(dec_u64, mask32);
-                    let dec_tagged = builder.ins().bor(dec_masked, int_tag);
-                    // Dec writes original to src, decremented to dst.
-                    Self::store_reg(builder, reg_base, u32::from(src), src_val);
-                    Self::store_reg(builder, reg_base, u32::from(dst), dec_tagged);
-                    builder.ins().jump(merge_block, &[]);
-
-                    builder.switch_to_block(slow_block);
-                    let d = i32const(builder, u32::from(dst));
-                    let s = i32const(builder, u32::from(src));
-                    Self::emit_fallible_call(
-                        builder,
-                        dec_ref,
-                        &[ctx_ptr, d, s],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                    builder.ins().jump(merge_block, &[]);
-
-                    builder.switch_to_block(merge_block);
-                }
-                Instruction::IncrementLoopIteration => {
-                    // Call helper to increment the loop iteration counter and
-                    // check runtime limits. The helper returns 1 if the limit
-                    // is exceeded.
-                    Self::emit_fallible_call(
-                        builder,
-                        inc_loop_ref,
-                        &[ctx_ptr],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
+                // --- Control flow ---
                 Instruction::Jump { address } => {
-                    let target = block_map[&address.as_u32()];
-                    builder.ins().jump(target, &[]);
+                    lctx.lower_jump(address.as_u32());
                     terminated = true;
                 }
-                Instruction::JumpIfNotLessThan { lhs, rhs, address } => {
-                    let target = block_map[&address.as_u32()];
-
-                    // Inline integer fast path.
-                    let lhs_val = Self::load_reg(builder, reg_base, u32::from(lhs));
-                    let rhs_val = Self::load_reg(builder, reg_base, u32::from(rhs));
-
-                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let lhs_tag = builder.ins().band(lhs_val, mask);
-                    let rhs_tag = builder.ins().band(rhs_val, mask);
-                    let lhs_is_int = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        lhs_tag,
-                        int_tag,
-                    );
-                    let rhs_is_int = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        rhs_tag,
-                        int_tag,
-                    );
-                    let both_int = builder.ins().band(lhs_is_int, rhs_is_int);
-
-                    let fast_block = builder.create_block();
-                    let slow_block = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(both_int, fast_block, &[], slow_block, &[]);
-
-                    // Fast path: compare as i32 (lower 32 bits).
-                    builder.switch_to_block(fast_block);
-
-                    let lhs_i32 = builder.ins().ireduce(types::I32, lhs_val);
-                    let rhs_i32 = builder.ins().ireduce(types::I32, rhs_val);
-                    let is_less = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
-                        lhs_i32,
-                        rhs_i32,
-                    );
-                    let fast_continue = builder.create_block();
-                    // If lhs < rhs, don't jump (continue). Else jump to target.
-                    builder.ins().brif(is_less, fast_continue, &[], target, &[]);
-
-                    // Slow path: call helper.
-                    builder.switch_to_block(slow_block);
-
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    let result = builder.ins().call(not_lt_ref, &[ctx_ptr, l, r]);
-                    let tag = builder.inst_results(result)[0];
-
-                    let two = builder.ins().iconst(types::I64, 2);
-                    let is_error = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        tag,
-                        two,
-                    );
-                    let not_error = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(is_error, error_block, &[], not_error, &[]);
-
-                    builder.switch_to_block(not_error);
-
-                    let one = builder.ins().iconst(types::I64, 1);
-                    let should_jump = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        tag,
-                        one,
-                    );
-                    builder
-                        .ins()
-                        .brif(should_jump, target, &[], fast_continue, &[]);
-
-                    // Continue block after either path.
-                    builder.switch_to_block(fast_continue);
-                }
-                Instruction::JumpIfNotLessThanOrEqual { lhs, rhs, address } => {
-                    // Jump if !(lhs <= rhs). Inline integer fast path + helper slow path.
-                    let target = block_map[&address.as_u32()];
-                    let reg_base = builder.use_var(reg_base_var);
-                    let lhs_off = (u32::from(lhs) as i32) * 8;
-                    let rhs_off = (u32::from(rhs) as i32) * 8;
-                    let lhs_val = builder.ins().load(
-                        types::I64,
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        reg_base,
-                        lhs_off,
-                    );
-                    let rhs_val = builder.ins().load(
-                        types::I64,
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        reg_base,
-                        rhs_off,
-                    );
-                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let lt = builder.ins().band(lhs_val, mask);
-                    let rt = builder.ins().band(rhs_val, mask);
-                    let li = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        lt,
-                        int_tag,
-                    );
-                    let ri = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        rt,
-                        int_tag,
-                    );
-                    let both = builder.ins().band(li, ri);
-                    let fast_block = builder.create_block();
-                    let slow_block = builder.create_block();
-                    let cont_block = builder.create_block();
-                    builder.ins().brif(both, fast_block, &[], slow_block, &[]);
-
-                    // Fast path: compare as i32.
-                    builder.switch_to_block(fast_block);
-                    let l32 = builder.ins().ireduce(types::I32, lhs_val);
-                    let r32 = builder.ins().ireduce(types::I32, rhs_val);
-                    let is_le = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
-                        l32,
-                        r32,
-                    );
-                    builder.ins().brif(is_le, cont_block, &[], target, &[]);
-
-                    // Slow path: use le_ref helper with scratch register 0.
-                    builder.switch_to_block(slow_block);
-                    let scratch = i32const(builder, 0);
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        le_ref,
-                        &[ctx_ptr, scratch, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                    let reg_base2 = builder.use_var(reg_base_var);
-                    let result = Self::load_reg(builder, reg_base2, 0);
-                    let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
-                    let is_true = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        result,
-                        true_val,
-                    );
-                    builder.ins().brif(is_true, cont_block, &[], target, &[]);
-
-                    builder.switch_to_block(cont_block);
-                }
                 Instruction::JumpIfTrue { address, value } => {
-                    let target = block_map[&address.as_u32()];
-                    // Inline: load the value, check NaN-boxing tag for boolean.
-                    let val = Self::load_reg(builder, reg_base, u32::from(value));
-                    // Boolean true is 0x7FFA_0000_0000_0001, false is 0x7FFA_0000_0000_0000.
-                    // Check if it's a boolean by comparing tag, then check low bit.
-                    let bool_tag = builder
-                        .ins()
-                        .iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
-                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                    let val_tag = builder.ins().band(val, mask);
-                    let is_bool = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val_tag,
-                        bool_tag,
-                    );
-                    let fast_block = builder.create_block();
-                    let slow_block = builder.create_block();
-                    let cont_block = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(is_bool, fast_block, &[], slow_block, &[]);
-
-                    // Fast: check low bit for true/false.
-                    builder.switch_to_block(fast_block);
-                    let one = builder.ins().iconst(types::I64, 1);
-                    let low_bit = builder.ins().band(val, one);
-                    let zero64 = builder.ins().iconst(types::I64, 0);
-                    let is_true = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-                        low_bit,
-                        zero64,
-                    );
-                    builder.ins().brif(is_true, target, &[], cont_block, &[]);
-
-                    // Slow: call to_boolean via helper. For now just use a simple
-                    // check — integer 0 and undefined/null are falsy.
-                    // Actually, to_boolean is complex (strings, objects, etc).
-                    // Since we only JIT primitives, and StrictEq/comparisons produce
-                    // booleans, the fast path should cover most cases.
-                    // For safety, call the helper for non-boolean values.
-                    builder.switch_to_block(slow_block);
-                    // Check for integer 0 (falsy) or non-zero (truthy).
-                    let int_tag_v = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let val_tag2 = builder.ins().band(val, mask);
-                    let is_int = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val_tag2,
-                        int_tag_v,
-                    );
-                    let int_check_block = builder.create_block();
-                    let very_slow = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(is_int, int_check_block, &[], very_slow, &[]);
-
-                    builder.switch_to_block(int_check_block);
-                    let val_i32 = builder.ins().ireduce(types::I32, val);
-                    let zero_i32 = builder.ins().iconst(types::I32, 0);
-                    let is_nonzero = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-                        val_i32,
-                        zero_i32,
-                    );
-                    builder.ins().brif(is_nonzero, target, &[], cont_block, &[]);
-
-                    // Very slow: undefined (0x7FFB..0001) and null (0x7FFB..0000) are falsy.
-                    // Everything else is truthy for primitives.
-                    builder.switch_to_block(very_slow);
-                    let undef = builder
-                        .ins()
-                        .iconst(types::I64, 0x7FFB_0000_0000_0001_u64 as i64);
-                    let null = builder
-                        .ins()
-                        .iconst(types::I64, 0x7FFB_0000_0000_0000_u64 as i64);
-                    let is_undef = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        undef,
-                    );
-                    let is_null = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        null,
-                    );
-                    let falsy = builder.ins().bor(is_undef, is_null);
-                    // If falsy → don't jump (continue). If not falsy → truthy → jump.
-                    // Invert: brif(is_falsy, cont, target)
-                    builder.ins().brif(falsy, cont_block, &[], target, &[]);
-
-                    builder.switch_to_block(cont_block);
+                    lctx.lower_jump_if_true(reg_base, address.as_u32(), u32::from(value));
                 }
                 Instruction::JumpIfFalse { address, value } => {
-                    let target = block_map[&address.as_u32()];
-                    let val = Self::load_reg(builder, reg_base, u32::from(value));
-                    // Same logic as JumpIfTrue but inverted.
-                    let bool_tag = builder
-                        .ins()
-                        .iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
-                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                    let val_tag = builder.ins().band(val, mask);
-                    let is_bool = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val_tag,
-                        bool_tag,
-                    );
-                    let fast_block = builder.create_block();
-                    let slow_block = builder.create_block();
-                    let cont_block = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(is_bool, fast_block, &[], slow_block, &[]);
-
-                    builder.switch_to_block(fast_block);
-                    let one = builder.ins().iconst(types::I64, 1);
-                    let low_bit = builder.ins().band(val, one);
-                    let zero64 = builder.ins().iconst(types::I64, 0);
-                    let is_false = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        low_bit,
-                        zero64,
-                    );
-                    // If false → jump to target.
-                    builder.ins().brif(is_false, target, &[], cont_block, &[]);
-
-                    builder.switch_to_block(slow_block);
-                    // Check for integer 0 (falsy).
-                    let int_tag_v = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let val_tag2 = builder.ins().band(val, mask);
-                    let is_int = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val_tag2,
-                        int_tag_v,
-                    );
-                    let int_check_block = builder.create_block();
-                    let very_slow = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(is_int, int_check_block, &[], very_slow, &[]);
-
-                    builder.switch_to_block(int_check_block);
-                    let val_i32 = builder.ins().ireduce(types::I32, val);
-                    let zero_i32 = builder.ins().iconst(types::I32, 0);
-                    let is_zero = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val_i32,
-                        zero_i32,
-                    );
-                    builder.ins().brif(is_zero, target, &[], cont_block, &[]);
-
-                    builder.switch_to_block(very_slow);
-                    let undef = builder
-                        .ins()
-                        .iconst(types::I64, 0x7FFB_0000_0000_0001_u64 as i64);
-                    let null = builder
-                        .ins()
-                        .iconst(types::I64, 0x7FFB_0000_0000_0000_u64 as i64);
-                    let is_undef = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        undef,
-                    );
-                    let is_null = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        null,
-                    );
-                    let falsy = builder.ins().bor(is_undef, is_null);
-                    builder.ins().brif(falsy, target, &[], cont_block, &[]);
-
-                    builder.switch_to_block(cont_block);
+                    lctx.lower_jump_if_false(reg_base, address.as_u32(), u32::from(value));
                 }
-                // --- New jump/comparison opcodes ---
+                Instruction::JumpIfNotLessThan { lhs, rhs, address } => {
+                    lctx.lower_jump_if_not_less_than(
+                        reg_base,
+                        u32::from(lhs),
+                        u32::from(rhs),
+                        address.as_u32(),
+                    );
+                }
+                Instruction::JumpIfNotLessThanOrEqual { lhs, rhs, address } => {
+                    lctx.lower_jump_if_not_less_than_or_equal(
+                        u32::from(lhs),
+                        u32::from(rhs),
+                        address.as_u32(),
+                    );
+                }
                 Instruction::JumpIfNotGreaterThan { lhs, rhs, address } => {
-                    // Same as JumpIfNotLessThan but with > instead of <.
-                    // Jump if !(lhs > rhs), i.e. if lhs <= rhs.
-                    let target = block_map[&address.as_u32()];
-                    let reg_base = builder.use_var(reg_base_var);
-                    let lhs_off = (u32::from(lhs) as i32) * 8;
-                    let rhs_off = (u32::from(rhs) as i32) * 8;
-                    let lhs_val = builder.ins().load(
-                        types::I64,
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        reg_base,
-                        lhs_off,
+                    lctx.lower_jump_if_not_greater_than(
+                        u32::from(lhs),
+                        u32::from(rhs),
+                        address.as_u32(),
                     );
-                    let rhs_val = builder.ins().load(
-                        types::I64,
-                        cranelift_codegen::ir::MemFlags::trusted(),
-                        reg_base,
-                        rhs_off,
-                    );
-                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                    let int_tag = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let lt = builder.ins().band(lhs_val, mask);
-                    let rt = builder.ins().band(rhs_val, mask);
-                    let li = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        lt,
-                        int_tag,
-                    );
-                    let ri = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        rt,
-                        int_tag,
-                    );
-                    let both = builder.ins().band(li, ri);
-                    let fast_block = builder.create_block();
-                    let slow_block = builder.create_block();
-                    let cont_block = builder.create_block();
-                    builder.ins().brif(both, fast_block, &[], slow_block, &[]);
-                    builder.switch_to_block(fast_block);
-                    let l32 = builder.ins().ireduce(types::I32, lhs_val);
-                    let r32 = builder.ins().ireduce(types::I32, rhs_val);
-                    let is_gt = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
-                        l32,
-                        r32,
-                    );
-                    builder.ins().brif(is_gt, cont_block, &[], target, &[]);
-                    builder.switch_to_block(slow_block);
-                    // Slow: use gt helper then branch. Use register 0 as scratch for result.
-                    let scratch = i32const(builder, 0);
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        gt_ref,
-                        &[ctx_ptr, scratch, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                    let reg_base2 = builder.use_var(reg_base_var);
-                    let result = Self::load_reg(builder, reg_base2, 0);
-                    let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
-                    let is_true = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        result,
-                        true_val,
-                    );
-                    builder.ins().brif(is_true, cont_block, &[], target, &[]);
-                    builder.switch_to_block(cont_block);
                 }
                 Instruction::JumpIfNotGreaterThanOrEqual { lhs, rhs, address } => {
-                    let target = block_map[&address.as_u32()];
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    // Write comparison result to register 0 (scratch) to avoid corrupting lhs.
-                    let scratch = i32const(builder, 0);
-                    Self::emit_fallible_call(
-                        builder,
-                        ge_ref,
-                        &[ctx_ptr, scratch, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
+                    lctx.lower_jump_if_not_greater_than_or_equal(
+                        u32::from(lhs),
+                        u32::from(rhs),
+                        address.as_u32(),
                     );
-                    let reg_base2 = builder.use_var(reg_base_var);
-                    let result = Self::load_reg(builder, reg_base2, 0);
-                    let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
-                    let is_true = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        result,
-                        true_val,
-                    );
-                    let cont = builder.create_block();
-                    builder.ins().brif(is_true, cont, &[], target, &[]);
-                    builder.switch_to_block(cont);
                 }
                 Instruction::JumpIfNotEqual { lhs, rhs, address } => {
-                    let target = block_map[&address.as_u32()];
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    let scratch = i32const(builder, 0);
-                    Self::emit_fallible_call(
-                        builder,
-                        eq_ref,
-                        &[ctx_ptr, scratch, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                    let reg_base2 = builder.use_var(reg_base_var);
-                    let result = Self::load_reg(builder, reg_base2, 0);
-                    let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
-                    let is_true = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        result,
-                        true_val,
-                    );
-                    let cont = builder.create_block();
-                    builder.ins().brif(is_true, cont, &[], target, &[]);
-                    builder.switch_to_block(cont);
+                    lctx.lower_jump_if_not_equal(u32::from(lhs), u32::from(rhs), address.as_u32());
                 }
                 Instruction::JumpIfNullOrUndefined { address, value } => {
-                    let target = block_map[&address.as_u32()];
-                    let reg_base = builder.use_var(reg_base_var);
-                    let val = Self::load_reg(builder, reg_base, u32::from(value));
-                    let null = builder.ins().iconst(types::I64, Self::VALUE_NULL as i64);
-                    let undef = builder
-                        .ins()
-                        .iconst(types::I64, Self::VALUE_UNDEFINED as i64);
-                    let is_null = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        null,
-                    );
-                    let is_undef = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        undef,
-                    );
-                    let is_either = builder.ins().bor(is_null, is_undef);
-                    let cont = builder.create_block();
-                    builder.ins().brif(is_either, target, &[], cont, &[]);
-                    builder.switch_to_block(cont);
+                    lctx.lower_jump_if_null_or_undefined(address.as_u32(), u32::from(value));
                 }
                 Instruction::JumpIfNotUndefined { address, value } => {
-                    let target = block_map[&address.as_u32()];
-                    let reg_base = builder.use_var(reg_base_var);
-                    let val = Self::load_reg(builder, reg_base, u32::from(value));
-                    let undef = builder
-                        .ins()
-                        .iconst(types::I64, Self::VALUE_UNDEFINED as i64);
-                    let is_undef = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        undef,
-                    );
-                    let cont = builder.create_block();
-                    builder.ins().brif(is_undef, cont, &[], target, &[]);
-                    builder.switch_to_block(cont);
+                    lctx.lower_jump_if_not_undefined(address.as_u32(), u32::from(value));
                 }
                 Instruction::Case {
                     address,
                     value,
                     condition,
                 } => {
-                    // StrictEq comparison + conditional jump.
-                    let target = block_map[&address.as_u32()];
-                    let reg_base = builder.use_var(reg_base_var);
-                    let v = Self::load_reg(builder, reg_base, u32::from(value));
-                    let c = Self::load_reg(builder, reg_base, u32::from(condition));
-                    let is_eq =
-                        builder
-                            .ins()
-                            .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, v, c);
-                    let cont = builder.create_block();
-                    builder.ins().brif(is_eq, target, &[], cont, &[]);
-                    builder.switch_to_block(cont);
+                    lctx.lower_case(address.as_u32(), u32::from(value), u32::from(condition));
+                }
+                Instruction::LogicalAnd { address, value } => {
+                    lctx.lower_logical_and(reg_base, address.as_u32(), u32::from(value));
                 }
                 Instruction::LogicalOr { address, value } => {
-                    // If value is truthy, jump to address (short-circuit).
-                    // Same as JumpIfTrue.
-                    let target = block_map[&address.as_u32()];
-                    let reg_base = builder.use_var(reg_base_var);
-                    let val = Self::load_reg(builder, reg_base, u32::from(value));
-                    // Quick check: boolean true
-                    let true_val = builder.ins().iconst(types::I64, Self::VALUE_TRUE as i64);
-                    let is_true = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        true_val,
-                    );
-                    let check_more = builder.create_block();
-                    let cont = builder.create_block();
-                    builder.ins().brif(is_true, target, &[], check_more, &[]);
-                    builder.switch_to_block(check_more);
-                    // Not boolean true — check for falsy values (false, 0, null, undefined)
-                    let false_val = builder.ins().iconst(types::I64, Self::VALUE_FALSE as i64);
-                    let null_val = builder.ins().iconst(types::I64, Self::VALUE_NULL as i64);
-                    let undef_val = builder
-                        .ins()
-                        .iconst(types::I64, Self::VALUE_UNDEFINED as i64);
-                    let int_zero = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let is_false = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        false_val,
-                    );
-                    let is_null = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        null_val,
-                    );
-                    let is_undef = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        undef_val,
-                    );
-                    let is_zero = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        int_zero,
-                    );
-                    let f1 = builder.ins().bor(is_false, is_null);
-                    let f2 = builder.ins().bor(is_undef, is_zero);
-                    let falsy = builder.ins().bor(f1, f2);
-                    // If falsy → don't jump (continue). If truthy → jump.
-                    builder.ins().brif(falsy, cont, &[], target, &[]);
-                    builder.switch_to_block(cont);
+                    lctx.lower_logical_or(address.as_u32(), u32::from(value));
                 }
                 Instruction::Coalesce { address, value } => {
-                    // Nullish coalescing: if value is NOT null/undefined, jump.
-                    let target = block_map[&address.as_u32()];
-                    let reg_base = builder.use_var(reg_base_var);
-                    let val = Self::load_reg(builder, reg_base, u32::from(value));
-                    let null = builder.ins().iconst(types::I64, Self::VALUE_NULL as i64);
-                    let undef = builder
-                        .ins()
-                        .iconst(types::I64, Self::VALUE_UNDEFINED as i64);
-                    let is_null = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        null,
-                    );
-                    let is_undef = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        undef,
-                    );
-                    let is_nullish = builder.ins().bor(is_null, is_undef);
-                    let cont = builder.create_block();
-                    // If nullish → continue (evaluate right side). If not → jump (use left).
-                    builder.ins().brif(is_nullish, cont, &[], target, &[]);
-                    builder.switch_to_block(cont);
+                    lctx.lower_coalesce(address.as_u32(), u32::from(value));
                 }
-                // --- Function ---
-                Instruction::GetFunction { dst, index } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let idx = i32const(builder, u32::from(index));
-                    builder.ins().call(get_func_ref, &[ctx_ptr, d, idx]);
+                Instruction::IncrementLoopIteration => {
+                    lctx.lower_increment_loop_iteration();
                 }
-                Instruction::New { argument_count } => {
-                    let ac = i32const(builder, u32::from(argument_count));
-                    let slot_addr = builder.ins().stack_addr(self.ptr_type, reg_base_slot, 0);
-                    Self::emit_fallible_call(
-                        builder,
-                        new_ref,
-                        &[ctx_ptr, ac, slot_addr],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+
+                // --- Variables / bindings ---
+                Instruction::GetName { dst, binding_index } => {
+                    lctx.lower_get_name(u32::from(dst), u32::from(binding_index));
                 }
-                // --- Error ---
-                Instruction::Throw { src } => {
-                    let s = i32const(builder, u32::from(src));
-                    Self::emit_fallible_call(
-                        builder,
-                        throw_ref,
-                        &[ctx_ptr, s],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                // --- Variable / binding helpers ---
-                Instruction::SetName { src, binding_index } => {
-                    let s = i32const(builder, u32::from(src));
-                    let b = i32const(builder, u32::from(binding_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        set_name_ref,
-                        &[ctx_ptr, s, b],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
+                Instruction::GetNameGlobal {
+                    dst,
+                    binding_index,
+                    ic_index,
+                } => {
+                    lctx.lower_get_name_global(
+                        u32::from(dst),
+                        u32::from(binding_index),
+                        u32::from(ic_index),
                     );
                 }
                 Instruction::GetNameOrUndefined { dst, binding_index } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let b = i32const(builder, u32::from(binding_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        get_name_or_undef_ref,
-                        &[ctx_ptr, d, b],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+                    lctx.lower_get_name_or_undefined(u32::from(dst), u32::from(binding_index));
                 }
                 Instruction::GetNameAndLocator { dst, binding_index } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let b = i32const(builder, u32::from(binding_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        get_name_and_loc_ref,
-                        &[ctx_ptr, d, b],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+                    lctx.lower_get_name_and_locator(u32::from(dst), u32::from(binding_index));
                 }
                 Instruction::GetLocator { binding_index } => {
-                    let b = i32const(builder, u32::from(binding_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        get_locator_ref,
-                        &[ctx_ptr, b],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+                    lctx.lower_get_locator(u32::from(binding_index));
+                }
+                Instruction::SetName { src, binding_index } => {
+                    lctx.lower_set_name(u32::from(src), u32::from(binding_index));
                 }
                 Instruction::SetNameByLocator { src } => {
-                    let s = i32const(builder, u32::from(src));
-                    Self::emit_fallible_call(
-                        builder,
-                        set_name_by_loc_ref,
-                        &[ctx_ptr, s],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+                    lctx.lower_set_name_by_locator(u32::from(src));
                 }
                 Instruction::PutLexicalValue { src, binding_index } => {
-                    let s = i32const(builder, u32::from(src));
-                    let b = i32const(builder, u32::from(binding_index));
-                    builder.ins().call(put_lex_val_ref, &[ctx_ptr, s, b]);
+                    lctx.lower_put_lexical_value(u32::from(src), u32::from(binding_index));
                 }
                 Instruction::DefInitVar { src, binding_index } => {
-                    let s = i32const(builder, u32::from(src));
-                    let b = i32const(builder, u32::from(binding_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        def_init_var_ref,
-                        &[ctx_ptr, s, b],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+                    lctx.lower_def_init_var(u32::from(src), u32::from(binding_index));
                 }
                 Instruction::DeleteName { dst, binding_index } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let b = i32const(builder, u32::from(binding_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        delete_name_ref,
-                        &[ctx_ptr, d, b],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+                    lctx.lower_delete_name(u32::from(dst), u32::from(binding_index));
                 }
                 Instruction::In { dst, lhs, rhs } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let l = i32const(builder, u32::from(lhs));
-                    let r = i32const(builder, u32::from(rhs));
-                    Self::emit_fallible_call(
-                        builder,
-                        in_ref,
-                        &[ctx_ptr, d, l, r],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+                    lctx.lower_in(u32::from(dst), u32::from(lhs), u32::from(rhs));
                 }
                 Instruction::ToPropertyKey { src, dst } => {
-                    let s = i32const(builder, u32::from(src));
-                    let d = i32const(builder, u32::from(dst));
-                    Self::emit_fallible_call(
-                        builder,
-                        to_prop_key_ref,
-                        &[ctx_ptr, s, d],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
+                    lctx.lower_to_property_key(u32::from(src), u32::from(dst));
+                }
+
+                // --- Property access ---
+                Instruction::GetPropertyByName {
+                    dst,
+                    value,
+                    ic_index,
+                } => {
+                    lctx.lower_get_property_by_name(
+                        u32::from(dst),
+                        u32::from(value),
+                        u32::from(ic_index),
                     );
                 }
-                // --- Property access helpers ---
                 Instruction::SetPropertyByName {
                     value,
                     object,
                     ic_index,
                 } => {
-                    // Try to inline the IC check at compile time (same pattern as GetPropertyByName).
-                    let ic_idx = u32::from(ic_index) as usize;
-                    let ic_entry = &code.ic[ic_idx];
-                    let cached = ic_entry.entries.borrow();
-                    let ic_data = cached.first().and_then(|e| {
-                        use crate::object::shape::slot::SlotAttributes;
-                        let shape = e.shape.upgrade()?;
-                        if e.slot.attributes.contains(SlotAttributes::NOT_CACHEABLE)
-                            || e.slot.attributes.contains(SlotAttributes::PROTOTYPE)
-                            || e.slot.attributes.is_accessor_descriptor()
-                        {
-                            return None;
-                        }
-                        let addr = shape.to_addr_usize();
-                        let raw_gc_ptr = addr - helpers::gcbox_value_offset();
-                        Some((raw_gc_ptr as u64, e.slot.index))
-                    });
-                    drop(cached);
-
-                    if let Some((cached_shape_ptr, slot_idx)) = ic_data {
-                        let reg_base = builder.use_var(reg_base_var);
-                        let obj_val = Self::load_reg(builder, reg_base, u32::from(object));
-
-                        // Check that object is an object (tag == 0x7FFC).
-                        let kind_mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                        let obj_tag_const =
-                            builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
-                        let val_tag = builder.ins().band(obj_val, kind_mask);
-                        let is_obj = builder.ins().icmp(
-                            cranelift_codegen::ir::condcodes::IntCC::Equal,
-                            val_tag,
-                            obj_tag_const,
-                        );
-
-                        let obj_block = builder.create_block();
-                        let slow_block = builder.create_block();
-                        let merge_block = builder.create_block();
-                        builder.ins().brif(is_obj, obj_block, &[], slow_block, &[]);
-
-                        // Object confirmed. Extract pointer, check shape.
-                        builder.switch_to_block(obj_block);
-                        let ptr_mask = builder
-                            .ins()
-                            .iconst(types::I64, 0x0000_FFFF_FFFF_FFFF_u64 as i64);
-                        let obj_ptr = builder.ins().band(obj_val, ptr_mask);
-
-                        let shape_val = builder.ins().load(
-                            types::I64,
-                            cranelift_codegen::ir::MemFlags::trusted(),
-                            obj_ptr,
-                            self.ic_offsets.shape_ptr,
-                        );
-                        let cached_const =
-                            builder.ins().iconst(types::I64, cached_shape_ptr as i64);
-                        let shape_match = builder.ins().icmp(
-                            cranelift_codegen::ir::condcodes::IntCC::Equal,
-                            shape_val,
-                            cached_const,
-                        );
-
-                        let fast_block = builder.create_block();
-                        builder
-                            .ins()
-                            .brif(shape_match, fast_block, &[], slow_block, &[]);
-
-                        // IC hit! Store to storage[slot_idx].
-                        builder.switch_to_block(fast_block);
-                        let storage_data = builder.ins().load(
-                            types::I64,
-                            cranelift_codegen::ir::MemFlags::trusted(),
-                            obj_ptr,
-                            self.ic_offsets.storage_ptr,
-                        );
-                        let slot_off = (slot_idx as i32) * 8;
-
-                        // Load the new value and old value at the slot.
-                        let reg_base2 = builder.use_var(reg_base_var);
-                        let new_val = Self::load_reg(builder, reg_base2, u32::from(value));
-                        let old_val = builder.ins().load(
-                            types::I64,
-                            cranelift_codegen::ir::MemFlags::trusted(),
-                            storage_data,
-                            slot_off,
-                        );
-
-                        // GC: clone new value if pointer type.
-                        let mask_k = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                        let ptr_thresh = builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
-                        let new_tag = builder.ins().band(new_val, mask_k);
-                        let new_is_ptr = builder.ins().icmp(
-                            cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
-                            new_tag,
-                            ptr_thresh,
-                        );
-                        let clone_blk = builder.create_block();
-                        let after_clone = builder.create_block();
-                        builder
-                            .ins()
-                            .brif(new_is_ptr, clone_blk, &[], after_clone, &[]);
-
-                        builder.switch_to_block(clone_blk);
-                        builder.ins().call(clone_val_ref, &[new_val]);
-                        builder.ins().jump(after_clone, &[]);
-
-                        // Write the new value to storage.
-                        builder.switch_to_block(after_clone);
-                        builder.ins().store(
-                            cranelift_codegen::ir::MemFlags::trusted(),
-                            new_val,
-                            storage_data,
-                            slot_off,
-                        );
-
-                        // GC: drop old value if pointer type.
-                        let old_tag = builder.ins().band(old_val, mask_k);
-                        let old_is_ptr = builder.ins().icmp(
-                            cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
-                            old_tag,
-                            ptr_thresh,
-                        );
-                        let drop_blk = builder.create_block();
-                        let after_drop = builder.create_block();
-                        builder
-                            .ins()
-                            .brif(old_is_ptr, drop_blk, &[], after_drop, &[]);
-
-                        builder.switch_to_block(drop_blk);
-                        builder.ins().call(drop_val_ref, &[old_val]);
-                        builder.ins().jump(after_drop, &[]);
-
-                        builder.switch_to_block(after_drop);
-                        builder.ins().jump(merge_block, &[]);
-
-                        // Slow path.
-                        builder.switch_to_block(slow_block);
-                        let v = i32const(builder, u32::from(value));
-                        let o = i32const(builder, u32::from(object));
-                        let ic = i32const(builder, u32::from(ic_index));
-                        Self::emit_fallible_call(
-                            builder,
-                            set_prop_name_ref,
-                            &[ctx_ptr, v, o, ic],
-                            error_block,
-                            reg_base_var,
-                            reg_base_slot,
-                            self.ptr_type,
-                        );
-                        builder.ins().jump(merge_block, &[]);
-
-                        builder.switch_to_block(merge_block);
-                    } else {
-                        let v = i32const(builder, u32::from(value));
-                        let o = i32const(builder, u32::from(object));
-                        let ic = i32const(builder, u32::from(ic_index));
-                        Self::emit_fallible_call(
-                            builder,
-                            set_prop_name_ref,
-                            &[ctx_ptr, v, o, ic],
-                            error_block,
-                            reg_base_var,
-                            reg_base_slot,
-                            self.ptr_type,
-                        );
-                    }
+                    lctx.lower_set_property_by_name(
+                        u32::from(value),
+                        u32::from(object),
+                        u32::from(ic_index),
+                    );
                 }
                 Instruction::GetPropertyByNameWithThis {
                     dst,
@@ -2990,402 +4392,22 @@ impl JitCompiler {
                     value,
                     ic_index,
                 } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let r = i32const(builder, u32::from(receiver));
-                    let v = i32const(builder, u32::from(value));
-                    let ic = i32const(builder, u32::from(ic_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        get_prop_name_this_ref,
-                        &[ctx_ptr, d, r, v, ic],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
+                    lctx.lower_get_property_by_name_with_this(
+                        u32::from(dst),
+                        u32::from(receiver),
+                        u32::from(value),
+                        u32::from(ic_index),
                     );
-                }
-                Instruction::DefineOwnPropertyByName {
-                    object,
-                    value,
-                    name_index,
-                } => {
-                    let o = i32const(builder, u32::from(object));
-                    let v = i32const(builder, u32::from(value));
-                    let n = i32const(builder, u32::from(name_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        def_own_name_ref,
-                        &[ctx_ptr, o, v, n],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::DefineOwnPropertyByValue { value, key, object } => {
-                    let v = i32const(builder, u32::from(value));
-                    let k = i32const(builder, u32::from(key));
-                    let o = i32const(builder, u32::from(object));
-                    Self::emit_fallible_call(
-                        builder,
-                        def_own_val_ref,
-                        &[ctx_ptr, v, k, o],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::DeletePropertyByName { object, name_index } => {
-                    let o = i32const(builder, u32::from(object));
-                    let n = i32const(builder, u32::from(name_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        del_prop_name_ref,
-                        &[ctx_ptr, o, n],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::DeletePropertyByValue { object, key } => {
-                    let o = i32const(builder, u32::from(object));
-                    let k = i32const(builder, u32::from(key));
-                    Self::emit_fallible_call(
-                        builder,
-                        del_prop_val_ref,
-                        &[ctx_ptr, o, k],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::GetPrototype { object } => {
-                    let o = i32const(builder, u32::from(object));
-                    Self::emit_fallible_call(
-                        builder,
-                        get_proto_ref,
-                        &[ctx_ptr, o],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::SetPrototype { object, prototype } => {
-                    let o = i32const(builder, u32::from(object));
-                    let p = i32const(builder, u32::from(prototype));
-                    Self::emit_fallible_call(
-                        builder,
-                        set_proto_ref,
-                        &[ctx_ptr, o, p],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                // --- Object / array creation helpers ---
-                Instruction::StoreLiteral { dst, index } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let idx = i32const(builder, u32::from(index));
-                    builder.ins().call(store_literal_ref, &[ctx_ptr, d, idx]);
-                }
-                Instruction::StoreEmptyObject { dst } => {
-                    let d = i32const(builder, u32::from(dst));
-                    builder.ins().call(store_empty_obj_ref, &[ctx_ptr, d]);
-                }
-                Instruction::StoreNewArray { dst } => {
-                    let d = i32const(builder, u32::from(dst));
-                    builder.ins().call(store_new_arr_ref, &[ctx_ptr, d]);
-                }
-                Instruction::StoreRegexp {
-                    dst,
-                    pattern_index,
-                    flags_index,
-                } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let p = i32const(builder, u32::from(pattern_index));
-                    let f = i32const(builder, u32::from(flags_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        store_regexp_ref,
-                        &[ctx_ptr, d, p, f],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::PushValueToArray { value, array } => {
-                    let v = i32const(builder, u32::from(value));
-                    let a = i32const(builder, u32::from(array));
-                    Self::emit_fallible_call(
-                        builder,
-                        push_val_arr_ref,
-                        &[ctx_ptr, v, a],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::PushElisionToArray { array } => {
-                    let a = i32const(builder, u32::from(array));
-                    Self::emit_fallible_call(
-                        builder,
-                        push_elision_ref,
-                        &[ctx_ptr, a],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                // --- Scope helpers ---
-                Instruction::PushScope { scope_index } => {
-                    let s = i32const(builder, u32::from(scope_index));
-                    builder.ins().call(push_scope_ref, &[ctx_ptr, s]);
-                }
-                Instruction::CreateUnmappedArgumentsObject { dst } => {
-                    let d = i32const(builder, u32::from(dst));
-                    builder.ins().call(create_unmapped_args_ref, &[ctx_ptr, d]);
-                }
-                Instruction::RestParameterInit { dst } => {
-                    let d = i32const(builder, u32::from(dst));
-                    builder.ins().call(rest_param_ref, &[ctx_ptr, d]);
-                }
-                Instruction::SetRegisterFromAccumulator { dst } => {
-                    let d = i32const(builder, u32::from(dst));
-                    builder.ins().call(set_reg_from_acc_ref, &[ctx_ptr, d]);
-                }
-                // --- Error helpers ---
-                Instruction::ThrowNewTypeError { message } => {
-                    let m = i32const(builder, u32::from(message));
-                    Self::emit_fallible_call(
-                        builder,
-                        throw_type_err_ref,
-                        &[ctx_ptr, m],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::ThrowNewReferenceError { message } => {
-                    let m = i32const(builder, u32::from(message));
-                    Self::emit_fallible_call(
-                        builder,
-                        throw_ref_err_ref,
-                        &[ctx_ptr, m],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::ThrowMutateImmutable { index } => {
-                    let i = i32const(builder, u32::from(index));
-                    Self::emit_fallible_call(
-                        builder,
-                        throw_mutate_ref,
-                        &[ctx_ptr, i],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::GetName { dst, binding_index } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let b = i32const(builder, u32::from(binding_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        get_name_ref,
-                        &[ctx_ptr, d, b],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
-                }
-                Instruction::GetPropertyByName {
-                    dst,
-                    value,
-                    ic_index,
-                } => {
-                    // Try to inline the IC check at compile time.
-                    let ic_idx = u32::from(ic_index) as usize;
-                    let ic_entry = &code.ic[ic_idx];
-                    let cached = ic_entry.entries.borrow();
-                    let ic_data = cached.first().and_then(|e| {
-                        use crate::object::shape::slot::SlotAttributes;
-                        let shape = e.shape.upgrade()?;
-                        if e.slot.attributes.contains(SlotAttributes::NOT_CACHEABLE)
-                            || e.slot.attributes.contains(SlotAttributes::PROTOTYPE)
-                            || e.slot.attributes.has_get()
-                        {
-                            return None;
-                        }
-                        // Compute the raw GcBox pointer from to_addr_usize.
-                        let addr = shape.to_addr_usize();
-                        let raw_gc_ptr = addr - helpers::gcbox_value_offset();
-                        Some((raw_gc_ptr as u64, e.slot.index))
-                    });
-                    drop(cached);
-
-                    if let Some((cached_shape_ptr, slot_idx)) = ic_data {
-                        let reg_base = builder.use_var(reg_base_var);
-                        let obj_val = Self::load_reg(builder, reg_base, u32::from(value));
-
-                        // Check that value is an object (tag == 0x7FFC).
-                        let kind_mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                        let obj_tag = builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
-                        let val_tag = builder.ins().band(obj_val, kind_mask);
-                        let is_obj = builder.ins().icmp(
-                            cranelift_codegen::ir::condcodes::IntCC::Equal,
-                            val_tag,
-                            obj_tag,
-                        );
-
-                        let obj_block = builder.create_block();
-                        let slow_block = builder.create_block();
-                        let merge_block = builder.create_block();
-                        builder.ins().brif(is_obj, obj_block, &[], slow_block, &[]);
-
-                        // Object confirmed. Extract pointer, check shape.
-                        builder.switch_to_block(obj_block);
-                        let ptr_mask = builder
-                            .ins()
-                            .iconst(types::I64, 0x0000_FFFF_FFFF_FFFF_u64 as i64);
-                        let obj_ptr = builder.ins().band(obj_val, ptr_mask);
-
-                        // Load shape Gc pointer at computed offset.
-                        let shape_val = builder.ins().load(
-                            types::I64,
-                            cranelift_codegen::ir::MemFlags::trusted(),
-                            obj_ptr,
-                            self.ic_offsets.shape_ptr,
-                        );
-                        let cached = builder.ins().iconst(types::I64, cached_shape_ptr as i64);
-                        let shape_match = builder.ins().icmp(
-                            cranelift_codegen::ir::condcodes::IntCC::Equal,
-                            shape_val,
-                            cached,
-                        );
-
-                        let fast_block = builder.create_block();
-                        builder
-                            .ins()
-                            .brif(shape_match, fast_block, &[], slow_block, &[]);
-
-                        // IC hit! Load from storage[slot_idx].
-                        builder.switch_to_block(fast_block);
-                        let storage_data = builder.ins().load(
-                            types::I64,
-                            cranelift_codegen::ir::MemFlags::trusted(),
-                            obj_ptr,
-                            self.ic_offsets.storage_ptr,
-                        );
-                        let slot_off = (slot_idx as i32) * 8;
-                        let prop_val = builder.ins().load(
-                            types::I64,
-                            cranelift_codegen::ir::MemFlags::trusted(),
-                            storage_data,
-                            slot_off,
-                        );
-
-                        // GC: clone if pointer type, drop old dst if pointer type.
-                        let mask_k = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                        let ptr_thresh = builder.ins().iconst(types::I64, Self::MASK_OBJECT as i64);
-                        let new_tag = builder.ins().band(prop_val, mask_k);
-                        let new_is_ptr = builder.ins().icmp(
-                            cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
-                            new_tag,
-                            ptr_thresh,
-                        );
-                        let clone_blk = builder.create_block();
-                        let after_clone = builder.create_block();
-                        builder
-                            .ins()
-                            .brif(new_is_ptr, clone_blk, &[], after_clone, &[]);
-
-                        builder.switch_to_block(clone_blk);
-                        builder.ins().call(clone_val_ref, &[prop_val]);
-                        builder.ins().jump(after_clone, &[]);
-
-                        builder.switch_to_block(after_clone);
-                        let old_dst = Self::load_reg(builder, reg_base, u32::from(dst));
-                        let old_tag = builder.ins().band(old_dst, mask_k);
-                        let old_is_ptr = builder.ins().icmp(
-                            cranelift_codegen::ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
-                            old_tag,
-                            ptr_thresh,
-                        );
-                        let drop_blk = builder.create_block();
-                        let after_drop = builder.create_block();
-                        builder
-                            .ins()
-                            .brif(old_is_ptr, drop_blk, &[], after_drop, &[]);
-
-                        builder.switch_to_block(drop_blk);
-                        builder.ins().call(drop_val_ref, &[old_dst]);
-                        builder.ins().jump(after_drop, &[]);
-
-                        builder.switch_to_block(after_drop);
-                        Self::store_reg(builder, reg_base, u32::from(dst), prop_val);
-                        builder.ins().jump(merge_block, &[]);
-
-                        // Slow path.
-                        builder.switch_to_block(slow_block);
-                        let d = i32const(builder, u32::from(dst));
-                        let o = i32const(builder, u32::from(value));
-                        let ic = i32const(builder, u32::from(ic_index));
-                        Self::emit_fallible_call(
-                            builder,
-                            get_prop_name_ref,
-                            &[ctx_ptr, d, o, ic],
-                            error_block,
-                            reg_base_var,
-                            reg_base_slot,
-                            self.ptr_type,
-                        );
-                        builder.ins().jump(merge_block, &[]);
-
-                        builder.switch_to_block(merge_block);
-                    } else {
-                        let d = i32const(builder, u32::from(dst));
-                        let o = i32const(builder, u32::from(value));
-                        let ic = i32const(builder, u32::from(ic_index));
-                        Self::emit_fallible_call(
-                            builder,
-                            get_prop_name_ref,
-                            &[ctx_ptr, d, o, ic],
-                            error_block,
-                            reg_base_var,
-                            reg_base_slot,
-                            self.ptr_type,
-                        );
-                    }
                 }
                 Instruction::GetLengthProperty {
                     dst,
                     value,
                     ic_index,
                 } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let v = i32const(builder, u32::from(value));
-                    let ic = i32const(builder, u32::from(ic_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        get_length_ref,
-                        &[ctx_ptr, d, v, ic],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
+                    lctx.lower_get_length_property(
+                        u32::from(dst),
+                        u32::from(value),
+                        u32::from(ic_index),
                     );
                 }
                 Instruction::GetPropertyByValue {
@@ -3394,18 +4416,11 @@ impl JitCompiler {
                     receiver,
                     object,
                 } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let k = i32const(builder, u32::from(key));
-                    let r = i32const(builder, u32::from(receiver));
-                    let o = i32const(builder, u32::from(object));
-                    Self::emit_fallible_call(
-                        builder,
-                        get_prop_val_ref,
-                        &[ctx_ptr, d, k, r, o],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
+                    lctx.lower_get_property_by_value(
+                        u32::from(dst),
+                        u32::from(key),
+                        u32::from(receiver),
+                        u32::from(object),
                     );
                 }
                 Instruction::GetPropertyByValuePush {
@@ -3414,18 +4429,11 @@ impl JitCompiler {
                     receiver,
                     object,
                 } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let k = i32const(builder, u32::from(key));
-                    let r = i32const(builder, u32::from(receiver));
-                    let o = i32const(builder, u32::from(object));
-                    Self::emit_fallible_call(
-                        builder,
-                        get_prop_val_push_ref,
-                        &[ctx_ptr, d, k, r, o],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
+                    lctx.lower_get_property_by_value_push(
+                        u32::from(dst),
+                        u32::from(key),
+                        u32::from(receiver),
+                        u32::from(object),
                     );
                 }
                 Instruction::SetPropertyByValue {
@@ -3434,172 +4442,139 @@ impl JitCompiler {
                     receiver,
                     object,
                 } => {
-                    let v = i32const(builder, u32::from(value));
-                    let k = i32const(builder, u32::from(key));
-                    let r = i32const(builder, u32::from(receiver));
-                    let o = i32const(builder, u32::from(object));
-                    Self::emit_fallible_call(
-                        builder,
-                        set_prop_val_ref,
-                        &[ctx_ptr, v, k, r, o],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
+                    lctx.lower_set_property_by_value(
+                        u32::from(value),
+                        u32::from(key),
+                        u32::from(receiver),
+                        u32::from(object),
                     );
                 }
-                Instruction::LogicalAnd { address, value } => {
-                    // Identical to JumpIfFalse: if value is falsy, jump to address.
-                    // The value stays in its register (short-circuit result).
-                    let target = block_map[&address.as_u32()];
-                    let val = Self::load_reg(builder, reg_base, u32::from(value));
-
-                    // Fast path: check for boolean false.
-                    let bool_tag = builder
-                        .ins()
-                        .iconst(types::I64, 0x7FFA_0000_0000_0000_u64 as i64);
-                    let mask = builder.ins().iconst(types::I64, Self::MASK_KIND as i64);
-                    let val_tag = builder.ins().band(val, mask);
-                    let is_bool = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val_tag,
-                        bool_tag,
-                    );
-                    let fast_block = builder.create_block();
-                    let slow_block = builder.create_block();
-                    let cont_block = builder.create_block();
-                    builder
-                        .ins()
-                        .brif(is_bool, fast_block, &[], slow_block, &[]);
-
-                    builder.switch_to_block(fast_block);
-                    let one = builder.ins().iconst(types::I64, 1);
-                    let low_bit = builder.ins().band(val, one);
-                    let zero64 = builder.ins().iconst(types::I64, 0);
-                    let is_false = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        low_bit,
-                        zero64,
-                    );
-                    builder.ins().brif(is_false, target, &[], cont_block, &[]);
-
-                    // Slow: check integer 0, undefined, null.
-                    builder.switch_to_block(slow_block);
-                    let int_tag_v = builder.ins().iconst(types::I64, Self::MASK_INT32 as i64);
-                    let val_tag2 = builder.ins().band(val, mask);
-                    let is_int = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val_tag2,
-                        int_tag_v,
-                    );
-                    let int_check = builder.create_block();
-                    let very_slow = builder.create_block();
-                    builder.ins().brif(is_int, int_check, &[], very_slow, &[]);
-
-                    builder.switch_to_block(int_check);
-                    let val_i32 = builder.ins().ireduce(types::I32, val);
-                    let zero_i32 = builder.ins().iconst(types::I32, 0);
-                    let is_zero = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val_i32,
-                        zero_i32,
-                    );
-                    builder.ins().brif(is_zero, target, &[], cont_block, &[]);
-
-                    builder.switch_to_block(very_slow);
-                    let undef = builder
-                        .ins()
-                        .iconst(types::I64, 0x7FFB_0000_0000_0001_u64 as i64);
-                    let null = builder
-                        .ins()
-                        .iconst(types::I64, 0x7FFB_0000_0000_0000_u64 as i64);
-                    let is_undef = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        undef,
-                    );
-                    let is_null = builder.ins().icmp(
-                        cranelift_codegen::ir::condcodes::IntCC::Equal,
-                        val,
-                        null,
-                    );
-                    let falsy = builder.ins().bor(is_undef, is_null);
-                    builder.ins().brif(falsy, target, &[], cont_block, &[]);
-
-                    builder.switch_to_block(cont_block);
-                }
-                Instruction::GetNameGlobal {
-                    dst,
-                    binding_index,
-                    ic_index,
+                Instruction::DefineOwnPropertyByName {
+                    object,
+                    value,
+                    name_index,
                 } => {
-                    let d = i32const(builder, u32::from(dst));
-                    let b = i32const(builder, u32::from(binding_index));
-                    let ic = i32const(builder, u32::from(ic_index));
-                    Self::emit_fallible_call(
-                        builder,
-                        get_name_global_ref,
-                        &[ctx_ptr, d, b, ic],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
+                    lctx.lower_define_own_property_by_name(
+                        u32::from(object),
+                        u32::from(value),
+                        u32::from(name_index),
                     );
+                }
+                Instruction::DefineOwnPropertyByValue { value, key, object } => {
+                    lctx.lower_define_own_property_by_value(
+                        u32::from(value),
+                        u32::from(key),
+                        u32::from(object),
+                    );
+                }
+                Instruction::DeletePropertyByName { object, name_index } => {
+                    lctx.lower_delete_property_by_name(u32::from(object), u32::from(name_index));
+                }
+                Instruction::DeletePropertyByValue { object, key } => {
+                    lctx.lower_delete_property_by_value(u32::from(object), u32::from(key));
+                }
+                Instruction::GetPrototype { object } => {
+                    lctx.lower_get_prototype(u32::from(object));
+                }
+                Instruction::SetPrototype { object, prototype } => {
+                    lctx.lower_set_prototype(u32::from(object), u32::from(prototype));
+                }
+
+                // --- Object / array ---
+                Instruction::StoreLiteral { dst, index } => {
+                    lctx.lower_store_literal(u32::from(dst), u32::from(index));
+                }
+                Instruction::StoreEmptyObject { dst } => {
+                    lctx.lower_store_empty_object(u32::from(dst));
+                }
+                Instruction::StoreNewArray { dst } => {
+                    lctx.lower_store_new_array(u32::from(dst));
+                }
+                Instruction::StoreRegexp {
+                    dst,
+                    pattern_index,
+                    flags_index,
+                } => {
+                    lctx.lower_store_regexp(
+                        u32::from(dst),
+                        u32::from(pattern_index),
+                        u32::from(flags_index),
+                    );
+                }
+                Instruction::PushValueToArray { value, array } => {
+                    lctx.lower_push_value_to_array(u32::from(value), u32::from(array));
+                }
+                Instruction::PushElisionToArray { array } => {
+                    lctx.lower_push_elision_to_array(u32::from(array));
+                }
+
+                // --- Function ---
+                Instruction::GetFunction { dst, index } => {
+                    lctx.lower_get_function(u32::from(dst), u32::from(index));
                 }
                 Instruction::Call { argument_count } => {
-                    let ac = i32const(builder, u32::from(argument_count));
-                    // Pass the address of the reg_base stack slot so jit_call
-                    // can update it after the callee returns.
-                    let slot_addr = builder.ins().stack_addr(self.ptr_type, reg_base_slot, 0);
-                    Self::emit_fallible_call(
-                        builder,
-                        call_ref,
-                        &[ctx_ptr, ac, slot_addr],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+                    lctx.lower_call(u32::from(argument_count));
                 }
+                Instruction::New { argument_count } => {
+                    lctx.lower_new(u32::from(argument_count));
+                }
+
+                // --- Scope ---
+                Instruction::PushScope { scope_index } => {
+                    lctx.lower_push_scope(u32::from(scope_index));
+                }
+                Instruction::CreateUnmappedArgumentsObject { dst } => {
+                    lctx.lower_create_unmapped_arguments_object(u32::from(dst));
+                }
+                Instruction::RestParameterInit { dst } => {
+                    lctx.lower_rest_parameter_init(u32::from(dst));
+                }
+                Instruction::SetRegisterFromAccumulator { dst } => {
+                    lctx.lower_set_register_from_accumulator(u32::from(dst));
+                }
+
+                // --- Error ---
+                Instruction::Throw { src } => {
+                    lctx.lower_throw(u32::from(src));
+                }
+                Instruction::ThrowNewTypeError { message } => {
+                    lctx.lower_throw_new_type_error(u32::from(message));
+                }
+                Instruction::ThrowNewReferenceError { message } => {
+                    lctx.lower_throw_new_reference_error(u32::from(message));
+                }
+                Instruction::ThrowMutateImmutable { index } => {
+                    lctx.lower_throw_mutate_immutable(u32::from(index));
+                }
+
+                // --- Return ---
                 Instruction::CheckReturn => {
-                    // Call helper to handle constructor return value logic.
-                    // For non-constructors this is a fast no-op (checks one flag).
-                    Self::emit_fallible_call(
-                        builder,
-                        check_return_ref,
-                        &[ctx_ptr],
-                        error_block,
-                        reg_base_var,
-                        reg_base_slot,
-                        self.ptr_type,
-                    );
+                    lctx.lower_check_return();
                 }
                 Instruction::Return => {
-                    let result = builder.ins().call(ret_ref, &[ctx_ptr]);
-                    let tag = builder.inst_results(result)[0];
-                    builder.ins().return_(&[tag]);
-                    terminated = true;
+                    terminated = lctx.lower_return();
                 }
+
                 _ => {
-                    let err = builder.ins().iconst(types::I64, 2);
-                    builder.ins().return_(&[err]);
+                    let err = lctx.builder.ins().iconst(types::I64, 2);
+                    lctx.builder.ins().return_(&[err]);
                     terminated = true;
                 }
             }
         }
 
         if !terminated {
-            let zero = builder.ins().iconst(types::I64, 0);
-            builder.ins().return_(&[zero]);
+            let zero = lctx.builder.ins().iconst(types::I64, 0);
+            lctx.builder.ins().return_(&[zero]);
         }
 
         // Finalize the error block.
-        builder.switch_to_block(error_block);
-        let err_tag = builder.ins().iconst(types::I64, 2);
-        builder.ins().return_(&[err_tag]);
+        lctx.builder.switch_to_block(error_block);
+        let err_tag = lctx.builder.ins().iconst(types::I64, 2);
+        lctx.builder.ins().return_(&[err_tag]);
 
         // Seal all blocks at once. This is simpler than tracking individual
         // block predecessors, especially with backward jumps (loops).
-        builder.seal_all_blocks();
+        lctx.builder.seal_all_blocks();
     }
 }
